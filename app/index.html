@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PEAK Registry</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="tcShell">
+      <aside class="globalNav" aria-label="Application navigation">
+        <button class="navItem active" type="button" title="Search" aria-label="Search" data-nav-mode="home" data-icon="search"></button>
+        <button class="navItem" type="button" title="Create" aria-label="Create" data-nav-mode="create" data-icon="create"></button>
+        <button class="navItem" type="button" title="Projects" aria-label="Projects" data-nav-mode="projects" data-icon="projects"></button>
+        <button class="navItem" type="button" title="Sync" aria-label="Sync" data-nav-mode="sync" data-icon="sync"><span id="repoBadge" class="navBadge" hidden></span></button>
+        <button class="navItem" type="button" title="Report" aria-label="Report" data-nav-mode="report" data-icon="report"></button>
+        <button class="navItem navBottom" type="button" title="Settings" aria-label="Settings" data-nav-mode="settings" data-icon="settings"></button>
+      </aside>
+
+      <section class="mainArea">
+        <header class="commandBar">
+          <div class="workspaceTitle">
+            <p class="eyebrow">1 -> Parts, lifecycle, evidence</p>
+            <h1 id="workspaceHeading">Search</h1>
+            <p id="recordCount">Loading records</p>
+          </div>
+          <div class="commandTools" aria-label="Search and filters">
+            <div class="searchBox">
+              <input id="searchInput" type="search" placeholder="Search by ID, name, owner, tag" autocomplete="off">
+              <div id="searchSuggestions" class="searchSuggestions" role="listbox"></div>
+            </div>
+            <select id="stateFilter" aria-label="Lifecycle state">
+              <option value="">All states</option>
+              <option value="draft">Draft</option>
+              <option value="release_candidate">Release Candidate</option>
+              <option value="released">Released</option>
+              <option value="obsolete">Obsolete</option>
+            </select>
+            <select id="projectFilter" aria-label="Project">
+              <option value="">All projects</option>
+            </select>
+          </div>
+        </header>
+
+        <section class="workspace">
+          <aside class="navigatorPane" aria-label="Navigation">
+            <div class="paneHeader">
+              <h2 id="navigatorTitle">Navigator</h2>
+              <button class="iconButton paneToggle" type="button" title="Collapse navigator" data-collapse-nav>&lt;</button>
+            </div>
+            <div id="navigationTree" class="navigationTree"></div>
+          </aside>
+          <div class="resizeHandle resizeHandleLeft" role="separator" aria-label="Resize navigator" tabindex="0" data-resize-pane="navigator"></div>
+
+          <section class="resultsPane" aria-label="Objects">
+            <div class="paneHeader resultsHeader">
+              <h2 id="resultsTitle">Objects</h2>
+            </div>
+            <div class="tableWrap">
+              <table class="objectTable">
+                <thead id="tableHead">
+                  <tr>
+                    <th scope="col">Object</th>
+                    <th scope="col">Name</th>
+                    <th scope="col">Revision</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Owner</th>
+                    <th scope="col">Last Modified</th>
+                  </tr>
+                </thead>
+                <tbody id="partsList"></tbody>
+              </table>
+            </div>
+          </section>
+          <div class="resizeHandle resizeHandleRight" role="separator" aria-label="Resize properties" tabindex="0" data-resize-pane="properties"></div>
+
+          <aside class="propertiesPane" aria-label="Properties">
+            <div class="paneHeader detailsPaneHeader">
+              <h2>Details</h2>
+              <button class="iconButton paneToggle" type="button" title="Collapse details" data-collapse-properties>&gt;</button>
+            </div>
+            <div id="partDetail" aria-live="polite"></div>
+          </aside>
+        </section>
+      </section>
+    </main>
+    <div id="partContextMenu" class="contextMenu" role="menu" hidden>
+      <button type="button" role="menuitem" data-context-action="open">Open</button>
+      <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
+      <button type="button" role="menuitem" data-context-action="edit">Edit</button>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
