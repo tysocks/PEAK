@@ -805,7 +805,7 @@ code {
 
 .createHub {
   display: grid;
-  grid-template-columns: repeat(4, minmax(140px, 200px));
+  grid-template-columns: repeat(3, minmax(140px, 200px));
   gap: 18px;
   align-items: start;
   justify-content: start;
@@ -854,6 +854,12 @@ code {
   }
 }
 
+@media (max-width: 540px) {
+  .createHub {
+    grid-template-columns: minmax(140px, 200px);
+  }
+}
+
 /* ── Create form (column layout) ── */
 .createFormRow td {
   height: auto;
@@ -891,9 +897,51 @@ code {
   white-space: nowrap;
 }
 
+.createFormFullHint {
+  justify-content: flex-start;
+}
+
 .createFormInput {
   height: 34px;
   font-size: 13px;
+}
+
+.createCheckboxField {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.createCheckboxField input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.createFormDropWrap {
+  position: relative;
+}
+
+.createFormSuggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-popup);
+  box-shadow: var(--shadow);
+}
+
+.createFormSuggestions[hidden] {
+  display: none;
 }
 
 .createFormActions {

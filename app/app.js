@@ -725,6 +725,34 @@ function searchMatches(query) {
   return parts.filter((part) => matchesSearch(part, trimmed)).slice(0, 8);
 }
 
+function renderBasedOnSuggestions(query) {
+  const container = document.querySelector("#basedOnSuggestions");
+  if (!container) return;
+  const trimmed = query.trim();
+  if (!trimmed) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  const matches = groupedPartResults(
+    parts.filter((part) => matchesSearch(part, trimmed))
+  ).slice(0, 10);
+  if (!matches.length) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = matches
+    .map((group) => `
+      <button class="suggestionItem" type="button" role="option" data-based-on-part="${escapeHtml(group.part_number)}">
+        <span>${escapeHtml(group.part_number)}</span>
+        <small>${escapeHtml(group.representative.name)}</small>
+      </button>
+    `)
+    .join("");
+  container.hidden = false;
+}
+
 function getOpenedPart() {
   return findPartByKey(openedPartNumber);
 }
@@ -881,9 +909,12 @@ function renderCreateItemRows({ fromSource }) {
       <div class="createFormField">
         <div class="createFormMeta">
           <label class="createFormLabel" for="newPartBasedOn">Based On</label>
-          <span class="createFormHint">Must reference an existing part number</span>
+          <span class="createFormHint">Search by part number or name</span>
         </div>
-        <input class="tableInput createFormInput" id="newPartBasedOn" value="" placeholder="Existing part number">
+        <div class="createFormDropWrap">
+          <input class="tableInput createFormInput" id="newPartBasedOn" value="" placeholder="Search part number or name" autocomplete="off">
+          <div id="basedOnSuggestions" class="createFormSuggestions" role="listbox" hidden></div>
+        </div>
       </div>
     `
     : "";
@@ -933,6 +964,7 @@ function renderCreateRevisionRows() {
     .map((group) => `<option value="${escapeHtml(group.part_number)}">${escapeHtml(group.part_number)} - ${escapeHtml(group.representative.name)}</option>`)
     .join("");
   const selectedBase = groupedPartResults(parts)[0]?.part_number || "";
+  const selectedSource = latestRevisionForPart(selectedBase);
   partsList.innerHTML = `
     <tr class="createFormRow">
       <td colspan="10">
@@ -947,9 +979,16 @@ function renderCreateRevisionRows() {
           <div class="createFormField">
             <div class="createFormMeta">
               <label class="createFormLabel" for="newRevisionValue">New Revision</label>
-              <span class="createFormHint">Created in draft state</span>
+              <span class="createFormHint">Computed from the selected part revision</span>
             </div>
-            <input class="tableInput createFormInput" id="newRevisionValue" value="${escapeHtml(nextRevisionForPart(selectedBase))}" readonly>
+            <input class="tableInput createFormInput" id="newRevisionValue" value="${escapeHtml(nextRevisionForPart(selectedSource))}" readonly>
+          </div>
+          <label class="createCheckboxField">
+            <input type="checkbox" id="newRevisionMinor">
+            <span>Minor Revision</span>
+          </label>
+          <div class="createFormMeta createFormFullHint">
+            <span class="createFormHint">Major revisions advance A to B. Minor revisions advance A to A01.</span>
           </div>
           <div class="createFormActions">
             <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub" title="Cancel" aria-label="Cancel"></button>
@@ -2153,6 +2192,10 @@ partsList.addEventListener("contextmenu", (event) => {
 });
 
 partsList.addEventListener("input", (event) => {
+  if (event.target.matches("#newPartBasedOn")) {
+    renderBasedOnSuggestions(event.target.value);
+    return;
+  }
   if (event.target.matches("#accentColorPicker")) {
     applyCustomAccentLive(event.target.value);
     return;
@@ -2174,11 +2217,8 @@ partsList.addEventListener("change", (event) => {
     generatePartNumberIntoForm();
     return;
   }
-  if (event.target.closest("#revisionSourcePart")) {
-    const revisionInput = document.querySelector("#newRevisionValue");
-    if (revisionInput) {
-      revisionInput.value = nextRevisionForPart(event.target.value);
-    }
+  if (event.target.closest("#revisionSourcePart, #newRevisionMinor")) {
+    updateNewRevisionValue();
     return;
   }
   if (event.target.matches("#accentColorPicker")) {
@@ -2204,6 +2244,16 @@ partsList.addEventListener("change", (event) => {
     return;
   }
 });
+
+function updateNewRevisionValue() {
+  const partNumber = document.querySelector("#revisionSourcePart")?.value;
+  const source = latestRevisionForPart(partNumber);
+  const isMinor = document.querySelector("#newRevisionMinor")?.checked === true;
+  const revisionInput = document.querySelector("#newRevisionValue");
+  if (revisionInput) {
+    revisionInput.value = nextRevisionForPart(source, { minor: isMinor });
+  }
+}
 
 partsList.addEventListener("dblclick", (event) => {
   if (event.target.closest("button, input, select, textarea")) {
@@ -2352,6 +2402,10 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".searchBox")) {
     searchSuggestions.classList.remove("visible");
   }
+  if (!event.target.closest(".createFormDropWrap")) {
+    const basedOnSuggestions = document.querySelector("#basedOnSuggestions");
+    if (basedOnSuggestions) basedOnSuggestions.hidden = true;
+  }
   if (!event.target.closest("#partContextMenu")) {
     hidePartContextMenu();
   }
@@ -2407,6 +2461,15 @@ navItems.forEach((button) => {
 });
 
 partsList.addEventListener("click", (event) => {
+  const basedOnButton = event.target.closest("[data-based-on-part]");
+  if (basedOnButton) {
+    const input = document.querySelector("#newPartBasedOn");
+    if (input) input.value = basedOnButton.dataset.basedOnPart;
+    const suggestions = document.querySelector("#basedOnSuggestions");
+    if (suggestions) suggestions.hidden = true;
+    return;
+  }
+
   const createModeButton = event.target.closest("[data-create-mode]");
   if (createModeButton) {
     activeCreateMode = createModeButton.dataset.createMode;
@@ -2716,10 +2779,9 @@ function createPartFromForm() {
       };
       persistLocalChanges();
     }
-    activeCreateMode = "hub";
     statusMessage = `${preflight} Created draft ${values.partNumber}^${values.revision}; remote draft push requires the local Git bridge.`;
     renderProjectOptions();
-    renderApp();
+    moveToPart(`${values.partNumber}^${values.revision}`);
   }
 }
 
@@ -2757,7 +2819,8 @@ function draftRemotePreflight() {
 function createRevisionFromForm() {
   const partNumber = document.querySelector("#revisionSourcePart")?.value;
   const source = latestRevisionForPart(partNumber);
-  const revision = nextRevisionForPart(partNumber);
+  const isMinor = document.querySelector("#newRevisionMinor")?.checked === true;
+  const revision = nextRevisionForPart(source, { minor: isMinor });
   if (!source) {
     statusMessage = "Select an existing part before creating a revision";
     renderApp();
@@ -2771,9 +2834,8 @@ function createRevisionFromForm() {
   const preflight = draftRemotePreflight();
   const created = createRevisionRecord(source, revision);
   if (created) {
-    activeCreateMode = "hub";
     statusMessage = `${preflight} Created draft ${partNumber}^${revision}; remote draft push requires the local Git bridge.`;
-    renderApp();
+    moveToPart(`${partNumber}^${revision}`);
   }
 }
 
@@ -3109,7 +3171,7 @@ function createPartRecord(values, options = {}) {
     schema: "peak.part.v2",
     part_number: values.partNumber,
     name: values.name,
-    description: values.description || "New part created in the PEAK registry UI.",
+    description: values.description || "",
     category: "general",
     project: values.project,
     traceability: "Not set",
@@ -3137,7 +3199,7 @@ function createPartRecord(values, options = {}) {
     approvers: [],
     bom: [],
     attachments: [],
-    change_summary: "Created from registry UI."
+    change_summary: values.changeSummary || ""
   };
   const part = {
     ...partProperties,
@@ -3145,7 +3207,7 @@ function createPartRecord(values, options = {}) {
     part_number: values.partNumber,
     object_id: `${values.partNumber}^${values.revision}`,
     name: values.name,
-    description: values.description || "New part created in the PEAK registry UI.",
+    description: values.description || "",
     category: "general",
     project: values.project,
     lifecycle_state: values.state,
@@ -3159,7 +3221,7 @@ function createPartRecord(values, options = {}) {
     manufacturers: [],
     approvers: [],
     bom: [],
-    change_summary: "Created from registry UI.",
+    change_summary: values.changeSummary || "",
     created_at: today,
     updated_at: today,
     created_by: values.owner,
@@ -3204,7 +3266,7 @@ function createRevisionRecord(source, revision) {
     approvers: [],
     bom: structuredCloneSafe(source.bom || []),
     attachments: [],
-    change_summary: `Draft revision ${revision} created from ${partObjectLabel(source)}.`
+    change_summary: ""
   };
   const partProperties = {
     ...(source.part_properties || {}),
@@ -3252,7 +3314,7 @@ function createRevisionRecord(source, revision) {
     updated_by: owner,
     updated_at: today,
     based_on: partKey(source),
-    change_summary: revisionProperties.change_summary,
+    change_summary: "",
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
@@ -3286,27 +3348,34 @@ function structuredCloneSafe(value) {
   }
 }
 
-function nextRevisionForPart(partNumber) {
-  const revisions = parts
-    .filter((part) => part.part_number === partNumber)
-    .map((part) => String(part.revision || "").trim().toUpperCase())
-    .filter(Boolean);
-  if (!revisions.length) {
+function nextRevisionForPart(source, { minor = false } = {}) {
+  const currentRevision = typeof source === "string" ? latestRevisionForPart(source)?.revision : source?.revision;
+  if (!currentRevision) {
     return "A";
   }
-  const highest = revisions.sort(compareRevisionLabels).at(-1);
-  return incrementRevisionLabel(highest);
+  return minor ? incrementMinorRevisionLabel(currentRevision) : incrementMajorRevisionLabel(currentRevision);
 }
 
-function compareRevisionLabels(a, b) {
-  if (a.length !== b.length) {
-    return a.length - b.length;
-  }
-  return a.localeCompare(b);
+function splitRevisionLabel(revision) {
+  const match = String(revision || "A").trim().toUpperCase().match(/^([A-Z]+)(\d+)?$/);
+  return {
+    major: match?.[1] || "A",
+    minor: match?.[2] || ""
+  };
 }
 
-function incrementRevisionLabel(revision) {
-  const chars = String(revision || "A").toUpperCase().split("");
+function incrementMajorRevisionLabel(revision) {
+  return incrementAlphaLabel(splitRevisionLabel(revision).major);
+}
+
+function incrementMinorRevisionLabel(revision) {
+  const { major, minor } = splitRevisionLabel(revision);
+  const nextMinor = minor ? Number(minor) + 1 : 1;
+  return `${major}${String(nextMinor).padStart(2, "0")}`;
+}
+
+function incrementAlphaLabel(label) {
+  const chars = String(label || "A").toUpperCase().split("");
   for (let index = chars.length - 1; index >= 0; index -= 1) {
     if (chars[index] !== "Z") {
       chars[index] = String.fromCharCode(chars[index].charCodeAt(0) + 1);
