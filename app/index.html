@@ -46,7 +46,6 @@
           <aside class="navigatorPane" aria-label="Navigation">
             <div class="paneHeader">
               <h2 id="navigatorTitle">Navigator</h2>
-              <button class="iconButton paneToggle" type="button" title="Collapse navigator" data-collapse-nav>&lt;</button>
             </div>
             <div id="navigationTree" class="navigationTree"></div>
           </aside>
@@ -75,10 +74,6 @@
           <div class="resizeHandle resizeHandleRight" role="separator" aria-label="Resize properties" tabindex="0" data-resize-pane="properties"></div>
 
           <aside class="propertiesPane" aria-label="Properties">
-            <div class="paneHeader detailsPaneHeader">
-              <h2>Details</h2>
-              <button class="iconButton paneToggle" type="button" title="Collapse details" data-collapse-properties>&gt;</button>
-            </div>
             <div id="partDetail" aria-live="polite"></div>
           </aside>
         </section>
@@ -89,9 +84,9 @@
       <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
       <button type="button" role="menuitem" data-context-action="edit">Edit</button>
     </div>
+    <input id="csvImportFile" type="file" accept=".csv,text/csv" hidden>
 
     <script src="config.js"></script>
-    <script src="data.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

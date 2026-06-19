@@ -1,2 +1,1 @@
-window.PEAK_DATA_URL = "../dist/peak-data.json";
-window.PLM_DATA_URL = window.PEAK_DATA_URL;
+// PEAK product data is selected from Settings > Setup with a local folder picker.
