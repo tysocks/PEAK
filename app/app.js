@@ -21,11 +21,17 @@ let parts = [];
 let selectedPartNumber = null;
 let openedPartNumber = null;
 let selectedBomPartNumber = null;
+let selectedProjectName = "";
 let activeNavMode = "home";
 let activePartEditMode = false;
+let activeProjectEditMode = false;
 let activeCreateMode = "hub";
 let activeResultView = "grid";
 let activePropertyTab = "overview";
+let activeAttachmentDraftCount = 0;
+let activeTableSort = { column: "part_number", direction: "asc" };
+let tableColumnFilters = {};
+let collapsedBomNodes = new Set();
 let activeSettingsTab = "setup";
 let activeColorScheme = localStorage.getItem("peakColorScheme") || "dark";
 let activeAccentColor = localStorage.getItem("peakAccentColor") || "teal";
@@ -39,6 +45,11 @@ let productDataFolderName = localStorage.getItem("peakProductDataFolderName") ||
 
 const productDataDbName = "peakProductData";
 const productDataStoreName = "handles";
+const productDataGithubOwner = "Launch-Canada";
+const productDataGithubRepo = "Product-Data";
+const productDataGithubBranch = "main";
+const productDataGithubRepoApi = `https://api.github.com/repos/${productDataGithubOwner}/${productDataGithubRepo}`;
+const productDataGithubUrl = `https://github.com/${productDataGithubOwner}/${productDataGithubRepo}`;
 
 const accentPresets = [
   { id: "teal", name: "Teal", color: "#35d1a8" },
@@ -50,6 +61,31 @@ const accentPresets = [
   { id: "amber", name: "Amber", color: "#fbbf24" },
   { id: "orange", name: "Orange", color: "#f97316" }
 ];
+
+const tabularColumns = [
+  { key: "part_number", label: "Part No", value: (part) => part.part_number },
+  { key: "revision", label: "Rev", value: (part) => part.revision || "A" },
+  { key: "name", label: "Name", value: (part) => part.name },
+  { key: "project", label: "Project", value: (part) => part.project },
+  { key: "state", label: "State", value: (part) => releaseStatusLabel(part) },
+  { key: "owner", label: "Owner", value: (part) => part.updated_by || part.owner || part.created_by },
+  { key: "maturity", label: "Maturity", value: (part) => maturityStageValue(part) },
+  { key: "traceability", label: "Traceability", value: (part) => part.traceability },
+  { key: "created_by", label: "Created By", value: (part) => part.created_by || part.owner },
+  { key: "created_at", label: "Created Date", value: (part) => part.created_at },
+  { key: "updated_by", label: "Last Edited By", value: (part) => part.updated_by || part.owner },
+  { key: "updated_at", label: "Last Edited Date", value: (part) => part.updated_at },
+  { key: "description", label: "Description", value: (part) => part.description },
+  { key: "revision_description", label: "Revision Description", value: (part) => part.change_summary },
+  { key: "google_drive", label: "Google Drive", value: (part) => documentUrl(part, "drive") },
+  { key: "onshape", label: "Onshape", value: (part) => documentUrl(part, "onshape") },
+  { key: "wi", label: "WI", value: (part) => documentUrl(part, "work") },
+  { key: "attachments", label: "Attachments", value: (part) => attachmentsForPart(part).length },
+  { key: "bom", label: "BOM Items", value: (part) => asArray(part.bom).length }
+];
+
+const revisionWorkflowStates = ["draft", "release_candidate", "released", "obsolete"];
+const maturityWorkflowStates = ["development", "npi", "production", "sunset", "obsolete"];
 
 function applyAppearance(scheme, accent) {
   document.body.classList.toggle("lightMode", scheme === "light");
@@ -198,7 +234,8 @@ function normalizeProjectsPayload(payload) {
     key: String(project.key || project.code || "").trim(),
     owner: String(project.owner || "").trim(),
     approvers: asArray(project.approvers).map((approver) => String(approver).trim()).filter(Boolean),
-    description: String(project.description || "").trim()
+    description: String(project.description || "").trim(),
+    drive_url: String(project.drive_url || project.google_drive_url || project.driveUrl || "").trim()
   })).filter((project) => project.name);
 }
 
@@ -213,7 +250,8 @@ function inferProjectsFromParts(sourceParts) {
       key: projectKeyFromName(part.project),
       owner: part.owner || "engineering@example.com",
       approvers: [],
-      description: `${part.project} project records`
+      description: `${part.project} project records`,
+      drive_url: ""
     });
   });
   return [...inferred.values()];
@@ -495,6 +533,7 @@ function renderApp() {
   }
   enableColumnResizing();
   enableBomColumnResizing();
+  enablePaneResizing();
   syncChrome();
 }
 
@@ -503,6 +542,13 @@ function renderSearchWorkspace() {
   const visibleGroups = groupedPartResults(visibleParts);
   if (activeNavMode === "home" && !visibleGroups.some((group) => group.part_number === findPartByKey(selectedPartNumber)?.part_number)) {
     selectedPartNumber = partKey(visibleGroups[0]?.representative) || null;
+  }
+  if (activeNavMode === "projects") {
+    const projectNames = projects();
+    if (!projectNames.includes(selectedProjectName)) {
+      selectedProjectName = projectNames[0] || "";
+      activeProjectEditMode = false;
+    }
   }
 
   recordCount.textContent = pageStatus(visibleParts);
@@ -526,6 +572,9 @@ function searchTitle() {
   if (activeNavMode === "sync") {
     return "Sync";
   }
+  if (activeNavMode === "table") {
+    return "Parts Table";
+  }
   if (activeNavMode === "report") {
     return "Report";
   }
@@ -536,7 +585,7 @@ function searchTitle() {
 }
 
 function renderMainRows(visibleParts) {
-  objectTable.classList.toggle("searchGalleryTable", activeNavMode === "home");
+  objectTable.classList.toggle("searchGalleryTable", activeNavMode === "home" || activeNavMode === "projects");
   if (activeNavMode === "create") {
     renderCreateRows();
     return;
@@ -547,6 +596,10 @@ function renderMainRows(visibleParts) {
   }
   if (activeNavMode === "sync") {
     renderSyncRows();
+    return;
+  }
+  if (activeNavMode === "table") {
+    renderTabularRows(visibleParts);
     return;
   }
   if (activeNavMode === "report") {
@@ -566,6 +619,7 @@ function pageHeading() {
     create: "Create",
     projects: "Projects",
     sync: "Sync",
+    table: "Table",
     report: "Report",
     settings: "Settings"
   };
@@ -578,6 +632,7 @@ function pageDescription() {
     create: "Create draft parts with project-specific part numbers.",
     projects: "Browse project folders, owners, approvers, and part counts.",
     sync: "Pull updates or prepare a branch and merge request for review.",
+    table: "Review every part revision and property in a sortable table.",
     report: "Select a report and review filtered registry results.",
     settings: "Configure local PEAK behavior for this workstation."
   };
@@ -592,6 +647,7 @@ function pageNavigatorTitle() {
     create: "Create",
     projects: "Projects",
     sync: "Sync",
+    table: "Table",
     report: "Reports",
     settings: "Settings"
   };
@@ -610,6 +666,9 @@ function pageStatus(visibleParts) {
   }
   if (activeNavMode === "report") {
     return `${visibleParts.length} records in report scope`;
+  }
+  if (activeNavMode === "table") {
+    return `${tabularParts(visibleParts).length} of ${visibleParts.length} table rows`;
   }
   if (activeNavMode === "sync") {
     return hasRepoChanges ? "Browser edits pending" : "No browser edits pending";
@@ -631,6 +690,10 @@ function renderPageDetail() {
   }
   if (activeNavMode === "sync") {
     partDetail.innerHTML = `<section class="propertySection"><h3>Sync</h3><p class="description">Sync requires a local bridge because browser JavaScript cannot run Git commands directly. This page shows the required pull and merge request workflow.</p></section>`;
+    return;
+  }
+  if (activeNavMode === "table") {
+    renderTabularDetail();
     return;
   }
   if (activeNavMode === "report") {
@@ -663,12 +726,8 @@ function renderOpenedPartWorkspace() {
   resultsTitle.textContent = activePartEditMode ? `${partObjectLabel(selectedPart)} Edit` : `${partObjectLabel(selectedPart)} Details`;
 
   renderBomTree();
-  if (activePartEditMode) {
-    renderPartEditorRows(selectedPart);
-  } else {
-    tableHead.innerHTML = "";
-    partsList.innerHTML = "";
-  }
+  tableHead.innerHTML = "";
+  partsList.innerHTML = "";
   renderOpenedPartDetail(rootPart, selectedPart);
 }
 
@@ -726,6 +785,7 @@ function searchMatches(query) {
 }
 
 function renderBasedOnSuggestions(query) {
+  const input = document.querySelector("#newPartBasedOn");
   const container = document.querySelector("#basedOnSuggestions");
   if (!container) return;
   const trimmed = query.trim();
@@ -750,6 +810,12 @@ function renderBasedOnSuggestions(query) {
       </button>
     `)
     .join("");
+  if (input) {
+    const rect = input.getBoundingClientRect();
+    container.style.top = `${rect.bottom + 4}px`;
+    container.style.left = `${rect.left}px`;
+    container.style.width = `${rect.width}px`;
+  }
   container.hidden = false;
 }
 
@@ -822,6 +888,100 @@ function latestReleasedRevision(revisions) {
       const dateCompare = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
       return dateCompare || String(b.revision || "").localeCompare(String(a.revision || ""));
     })[0];
+}
+
+function renderTabularRows(visibleParts) {
+  const rows = tabularParts(visibleParts);
+  tableHead.innerHTML = `
+    <tr class="tabularHeaderRow">
+      ${tabularColumns.map(tabularHeaderCell).join("")}
+    </tr>
+  `;
+
+  if (!rows.length) {
+    partsList.innerHTML = `<tr><td class="emptyCell" colspan="${tabularColumns.length}">No matching part rows</td></tr>`;
+    return;
+  }
+
+  partsList.innerHTML = rows.map((part) => `
+    <tr class="objectRow tabularRow${partKey(part) === selectedPartNumber ? " active" : ""}" data-part-number="${escapeHtml(partKey(part))}" tabindex="0">
+      ${tabularColumns.map((column) => tabularBodyCell(part, column)).join("")}
+    </tr>
+  `).join("");
+}
+
+function tabularHeaderCell(column) {
+  const isSorted = activeTableSort.column === column.key;
+  const direction = isSorted ? activeTableSort.direction : "";
+  return `
+    <th scope="col" class="tabularHeaderCell">
+      <button class="tableSortButton${isSorted ? " active" : ""}" type="button" data-table-sort="${escapeHtml(column.key)}" aria-label="Sort ${escapeHtml(column.label)} ${direction === "asc" ? "descending" : "ascending"}">
+        <span>${escapeHtml(column.label)}</span>
+        <span class="tableSortIndicator" aria-hidden="true">${
+          direction === "asc"
+            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>`
+            : direction === "desc"
+            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>`
+            : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l4-4 4 4"/><path d="M16 15l-4 4-4-4"/></svg>`
+        }</span>
+      </button>
+      <input class="tableFilterInput" value="${escapeHtml(tableColumnFilters[column.key] || "")}" data-table-filter="${escapeHtml(column.key)}" placeholder="" aria-label="Filter ${escapeHtml(column.label)}">
+    </th>
+  `;
+}
+
+function tabularBodyCell(part, column) {
+  const value = tabularColumnValue(part, column);
+  const isLink = ["google_drive", "onshape", "wi"].includes(column.key) && value;
+  const content = isLink
+    ? `<a href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a>`
+    : escapeHtml(value || "");
+  return `<td title="${escapeHtml(value || "")}">${content}</td>`;
+}
+
+function tabularParts(sourceParts) {
+  const filtered = sourceParts.filter((part) =>
+    tabularColumns.every((column) => {
+      const filter = String(tableColumnFilters[column.key] || "").trim().toLowerCase();
+      if (!filter) {
+        return true;
+      }
+      return String(tabularColumnValue(part, column) || "").toLowerCase().includes(filter);
+    })
+  );
+  const sortColumn = tabularColumns.find((column) => column.key === activeTableSort.column) || tabularColumns[0];
+  const direction = activeTableSort.direction === "desc" ? -1 : 1;
+  return [...filtered].sort((a, b) => {
+    const aValue = tabularColumnValue(a, sortColumn);
+    const bValue = tabularColumnValue(b, sortColumn);
+    const numeric = Number(aValue) - Number(bValue);
+    if (aValue !== "" && bValue !== "" && Number.isFinite(numeric)) {
+      return numeric * direction;
+    }
+    return String(aValue || "").localeCompare(String(bValue || ""), undefined, { numeric: true, sensitivity: "base" }) * direction;
+  });
+}
+
+function tabularColumnValue(part, column) {
+  return column.value(part) ?? "";
+}
+
+function renderTabularDetail() {
+  partDetail.innerHTML = `
+    <div class="tabularDetailLayout">
+      ${tabularActionRail()}
+    </div>
+  `;
+}
+
+function tabularActionRail() {
+  return `
+    <aside class="partActionRail" aria-label="Table actions">
+      ${partActionButton("Import Tabular Data", "import-tabular")}
+      ${partActionButton("Export Tabular CSV", "export-tabular-csv")}
+      ${partActionButton("Export PEAK JSON", "export-tabular-json")}
+    </aside>
+  `;
 }
 
 function renderReportRows(visibleParts) {
@@ -1056,40 +1216,102 @@ function renderCreateDetail() {
 }
 
 function renderProjectRows() {
-  tableHead.innerHTML = `
-    <tr>
-      <th scope="col">Project</th>
-      <th scope="col">Code</th>
-      <th scope="col">Owner</th>
-      <th scope="col">Approvers</th>
-      <th scope="col">Parts</th>
-      <th scope="col">Description</th>
-      <th scope="col">Action</th>
-    </tr>
-  `;
-  const existing = projects()
-    .map(
-      (project) => {
-        const approvers = projectApprovers(project);
-        return `
-        <tr class="projectFolder">
-          <td><span class="folderIcon" aria-hidden="true"></span>${escapeHtml(project)}</td>
-          <td><input class="tableInput" data-edit-project="${escapeHtml(project)}" data-field="key" value="${escapeHtml(projectKey(project))}"></td>
-          <td><input class="tableInput" data-edit-project="${escapeHtml(project)}" data-field="owner" value="${escapeHtml(projectOwner(project))}"></td>
-          <td><input class="tableInput" data-edit-project="${escapeHtml(project)}" data-field="approvers" value="${escapeHtml(approvers.join(", "))}"></td>
-          <td>${parts.filter((part) => part.project === project).length}</td>
-          <td><input class="tableInput" data-edit-project="${escapeHtml(project)}" data-field="description" value="${escapeHtml(projectDescription(project))}"></td>
-          <td><button class="iconButton primaryAction formAction" type="button" data-save-project="${escapeHtml(project)}">Save</button></td>
-        </tr>
-      `;
-      }
-    )
-    .join("");
-  partsList.innerHTML = existing || '<tr><td class="emptyCell" colspan="7">No projects found</td></tr>';
+  const projectNames = projects();
+  if (!projectNames.includes(selectedProjectName)) {
+    selectedProjectName = projectNames[0] || "";
+    activeProjectEditMode = false;
+  }
+  tableHead.innerHTML = "";
+  partsList.innerHTML = projectNames.length
+    ? projectNames.map(projectGalleryRow).join("")
+    : '<tr><td class="emptyCell">No projects found</td></tr>';
 }
 
 function renderProjectsDetail() {
-  partDetail.innerHTML = "";
+  const project = selectedProjectName || projects()[0] || "";
+  if (!project) {
+    partDetail.innerHTML = '<p class="empty">No project selected</p>';
+    return;
+  }
+  partDetail.innerHTML = `
+    <div class="projectDetailLayout">
+      <div class="partDetailMain">
+        ${renderProjectDetailBody(project)}
+      </div>
+      ${projectActionRail(project)}
+    </div>
+  `;
+}
+
+function projectGalleryRow(project) {
+  const count = parts.filter((part) => part.project === project).length;
+  const active = selectedProjectName === project ? " active" : "";
+  return `
+    <tr class="objectRow galleryRow${active}" data-project-name="${escapeHtml(project)}" tabindex="0">
+      <td colspan="6">
+        <div class="galleryItem">
+          <span class="folderIcon" aria-hidden="true"></span>
+          <div class="galleryItemText">
+            <strong>${escapeHtml(project)}</strong>
+            <p>${escapeHtml(projectDescription(project))}</p>
+          </div>
+          <span class="revisionList">${count} part${count === 1 ? "" : "s"}</span>
+          <span class="galleryOpenIcon" aria-hidden="true"></span>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderProjectDetailBody(project) {
+  const editing = activeProjectEditMode;
+  return `
+    <section class="propertySection">
+      <h3>Project</h3>
+      <dl class="propertyGrid">
+        ${property("Project Name", project)}
+        ${editing ? propertyProjectEditInline("Project Code", "key", projectKey(project)) : property("Project Code", projectKey(project))}
+        ${editing ? propertyProjectEditInline("Owner", "owner", projectOwner(project)) : property("Owner", projectOwner(project))}
+        ${editing ? propertyProjectEditInline("Approvers", "approvers", projectApprovers(project).join(", ")) : property("Approvers", projectApprovers(project).join(", ") || "Not set")}
+        ${editing ? propertyProjectEditInline("Google Drive Link", "drive_url", projectDriveUrl(project)) : propertyLink("Google Drive Link", projectDriveUrl(project))}
+        ${editing ? propertyProjectEditInline("Description", "description", projectDescription(project), { textarea: true }) : property("Description", projectDescription(project))}
+      </dl>
+      ${editing ? `
+        <div class="partEditActions">
+          <button class="iconButton primaryAction formAction" type="button" data-save-selected-project="${escapeHtml(project)}">Save Project</button>
+          <button class="iconButton formAction" type="button" data-cancel-project-edit>Cancel</button>
+        </div>
+      ` : ""}
+    </section>
+    <section class="propertySection">
+      <h3>Project Parts</h3>
+      <dl class="propertyGrid">
+        ${property("Part Count", parts.filter((part) => part.project === project).length)}
+        ${property("Draft Revisions", parts.filter((part) => part.project === project && isDraftRevision(part)).length)}
+        ${property("Released Revisions", parts.filter((part) => part.project === project && releaseStatusLabel(part) === "Released").length)}
+      </dl>
+    </section>
+  `;
+}
+
+function propertyProjectEditInline(label, field, value, { textarea = false } = {}) {
+  const control = textarea
+    ? `<textarea class="tableInput propertyInlineTextarea" data-selected-project-field="${escapeHtml(field)}">${escapeHtml(value || "")}</textarea>`
+    : `<input class="tableInput propertyInlineInput" data-selected-project-field="${escapeHtml(field)}" value="${escapeHtml(value || "")}">`;
+  return `
+    <dt>${escapeHtml(label)}</dt>
+    <dd>${control}</dd>
+  `;
+}
+
+function projectActionRail(project) {
+  return `
+    <aside class="partActionRail" aria-label="Project actions">
+      ${partActionButton("Open Project Folder", "open-project-folder")}
+      ${partActionButton("Open Google Drive", "open-project-drive", { disabled: !projectDriveUrl(project) })}
+      ${partActionButton("Edit Project", "edit-project", { active: activeProjectEditMode })}
+    </aside>
+  `;
 }
 
 function renderPartEditorRows(part) {
@@ -1108,9 +1330,9 @@ function renderPartEditorRows(part) {
     ${partEditorRow("Description", "description", part.description || "", "Stable part description")}
     ${partEditorSelectRow("Project", "project", part.project, projects(), "Project folder assignment")}
     ${partEditorRow("Traceability", "traceability", part.traceability || "", "Stable traceability value")}
-    ${partEditorSelectRow("Part Maturity", "maturity", maturityStageValue(part), ["development", "npi", "production", "sunset", "obsolete"], "Stable lifecycle maturity")}
+    ${partReadonlyRow("Part Maturity", maturityStageLabel(part), "Workflow-controlled part maturity")}
     ${partEditorRow("Revision", "revision", part.revision || "A", "Revision object identifier")}
-    ${partEditorSelectRow("Release Status", "lifecycle_state", part.lifecycle_state === "in_review" ? "release_candidate" : part.lifecycle_state, ["draft", "release_candidate", "released", "obsolete"], "Revision release status")}
+    ${partReadonlyRow("Release Status", releaseStatusLabel(part), "Workflow-controlled revision release status")}
     ${partEditorRow("Last Edited By", "owner", part.owner, "Last user to update this component")}
     ${partEditorRow("File Link", "driveUrl", drive, "Stable linked drawing/file")}
     ${partEditorRow("Onshape Link", "onshapeUrl", onshape, "Stable linked CAD object")}
@@ -1261,6 +1483,16 @@ function renderSettingsRows() {
         <td>PEAK remains usable without internet except GitHub sync</td>
       </tr>
       <tr>
+        <td>Product Data Remote</td>
+        <td><input class="tableInput" value="${escapeHtml(productDataGithubUrl)}" readonly></td>
+        <td>Draft edits push directly to main in this GitHub repository</td>
+      </tr>
+      <tr>
+        <td>GitHub Token</td>
+        <td><input class="tableInput" id="settingsGithubToken" type="password" value="${escapeHtml(localStorage.getItem("peakGithubToken") || "")}" autocomplete="off"></td>
+        <td>Requires contents write access to Launch-Canada/Product-Data</td>
+      </tr>
+      <tr>
         <td colspan="3"><button class="iconButton primaryAction formAction" type="button" data-save-settings>Save Settings</button></td>
       </tr>
     `;
@@ -1383,9 +1615,35 @@ function renderSearchDetail() {
 
 function renderOpenedPartDetail(rootPart, selectedPart) {
   partDetail.innerHTML = `
-    ${propertyTabs()}
-    ${renderPropertyBody(selectedPart)}
+    <div class="partDetailLayout">
+      <div class="partDetailMain">
+        ${propertyTabs()}
+        ${renderPropertyBody(selectedPart)}
+      </div>
+      ${partActionRail(selectedPart)}
+    </div>
   `;
+}
+
+function partActionRail(part) {
+  const driveUrl = documentUrl(part, "drive");
+  const onshapeUrl = documentUrl(part, "onshape");
+  const workUrl = documentUrl(part, "work");
+  const canEdit = isDraftRevision(part);
+  return `
+    <aside class="partActionRail" aria-label="Part actions">
+      ${partActionButton("Open Google Drive", "open-drive", { disabled: !driveUrl })}
+      ${partActionButton("Open Onshape", "open-onshape", { disabled: !onshapeUrl })}
+      ${partActionButton("Open WI", "open-work", { disabled: !workUrl })}
+      ${partActionButton("Edit Part", "edit-part", { disabled: !canEdit, active: activePartEditMode })}
+      ${partActionButton("Submit to Workflow", "submit-workflow")}
+      ${partActionButton("Copy Part ID", "copy-part-id")}
+    </aside>
+  `;
+}
+
+function partActionButton(label, action, { disabled = false, active = false } = {}) {
+  return `<button class="partActionButton${active ? " active" : ""}" type="button" data-part-action="${escapeHtml(action)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"${disabled ? " disabled" : ""}></button>`;
 }
 
 function propertyTabs() {
@@ -1401,9 +1659,12 @@ function propertyTabs() {
 
 function renderPropertyBody(part) {
   if (activePropertyTab === "attachments") {
+    if (activePartEditMode) {
+      return renderEditableAttachmentsTab(part);
+    }
     return `
       <div class="relationStack">
-        ${referenceSection("Attachments", attachmentsForPart(part), fileReference)}
+        ${renderAttachmentSections(part)}
       </div>
     `;
   }
@@ -1419,23 +1680,75 @@ function renderPropertyBody(part) {
   return renderOverviewTab(part);
 }
 
+function renderEditableAttachmentsTab(part) {
+  if (!isDraftRevision(part)) {
+    activePartEditMode = false;
+    return renderAttachmentSections(part);
+  }
+  return `
+    <div class="attachmentToolbar">
+      <button class="iconButton primaryAction attachmentAddButton" type="button" data-add-attachment-field title="Add attachment" aria-label="Add attachment">+</button>
+    </div>
+    <div class="relationStack">
+      ${renderAttachmentSections(part, { editable: true })}
+      <section class="propertySection attachmentEditSection">
+        <h3>New Attachments</h3>
+        <div class="attachmentEditRows" data-attachment-edit-rows>
+          ${Array.from({ length: activeAttachmentDraftCount }, (_, index) => attachmentEditRow(index)).join("")}
+        </div>
+      </section>
+      <div class="partEditActions">
+        <button class="iconButton primaryAction formAction" type="button" data-save-open-part="${escapeHtml(partKey(part))}">Save Attachments</button>
+        <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
+function attachmentEditRow(index = 0) {
+  return `
+    <div class="attachmentEditRow" data-attachment-row>
+      <label class="propertyEditField">
+        <span>Title</span>
+        <input class="tableInput" data-attachment-field="title" placeholder="Attachment title">
+      </label>
+      <label class="propertyEditField">
+        <span>Link</span>
+        <input class="tableInput" data-attachment-field="url" placeholder="https://">
+      </label>
+      <label class="propertyEditField">
+        <span>Type</span>
+        <select class="tableInput" data-attachment-field="type">
+          ${attachmentTypeOptions().map((type) => `<option value="${escapeHtml(type)}"${index === 0 && type === "DRAWINGS" ? " selected" : ""}>${escapeHtml(type)}</option>`).join("")}
+        </select>
+      </label>
+      <button class="iconButton attachmentRemoveButton attachmentRemoveRowButton" type="button" data-remove-new-attachment title="Remove row" aria-label="Remove row"></button>
+    </div>
+  `;
+}
+
+function attachmentTypeOptions() {
+  return ["DRAWINGS", "TEST REPORTS", "ANALYSIS", "WORK INSTRUCTIONS", "OTHER"];
+}
+
 function renderOverviewTab(part) {
+  const editing = activePartEditMode && isDraftRevision(part);
   return `
     <div class="overviewLayout">
       <div class="overviewColumn">
         ${detailSection("Properties", [
           property("Part No", part.part_number),
           property("Revision", part.revision),
-          property("Name", part.name),
-          property("Description", part.description || "Not set"),
-          property("Revision Description", part.change_summary || "Not set"),
+          editing ? propertyEditInline("Name", "name", part.name) : property("Name", part.name),
+          editing ? propertyEditInline("Description", "description", part.description || "", { textarea: true }) : property("Description", part.description || "Not set"),
+          editing ? propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }) : property("Revision Description", part.change_summary || "Not set"),
           property("Project", part.project || "Unassigned"),
-          property("Traceability", traceabilityLabel(part))
+          editing ? propertyEditInline("Traceability", "traceability", part.traceability || "") : property("Traceability", traceabilityLabel(part))
         ])}
         ${detailSection("Specifications", [
-          propertyLink("Google Drive Link", documentUrl(part, "drive")),
-          propertyLink("Onshape Link", documentUrl(part, "onshape")),
-          propertyLink("Work Instructions Link", documentUrl(part, "work"))
+          editing ? propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")) : propertyLink("Google Drive Link", documentUrl(part, "drive")),
+          editing ? propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")) : propertyLink("Onshape Link", documentUrl(part, "onshape")),
+          editing ? propertyEditInline("Work Instructions Link", "workUrl", documentUrl(part, "work")) : propertyLink("Work Instructions Link", documentUrl(part, "work"))
         ])}
         ${detailSection("Authoring", [
           property("Release Status", releaseStatusLabel(part)),
@@ -1445,12 +1758,43 @@ function renderOverviewTab(part) {
           property("Updated Date", part.updated_at),
           propertyHtml("Based On", basedOnLink(part))
         ])}
+        ${editing ? detailSection("Workflow", [
+          property("Part Maturity", maturityStageLabel(part)),
+          propertyEditInline("Approvers", "approvers", (part.approvers ?? []).map((approver) => approver.name || approver).join(", "))
+        ]) : ""}
+        ${editing ? `
+          <div class="partEditActions">
+            <button class="iconButton primaryAction formAction" type="button" data-save-open-part="${escapeHtml(partKey(part))}">Save Part</button>
+            <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
+          </div>
+        ` : ""}
       </div>
       <div class="overviewColumn">
         ${renderMaturityProgress(part)}
         ${renderRevisionHistory(part)}
       </div>
     </div>
+  `;
+}
+
+function propertyEditInline(label, field, value, { textarea = false } = {}) {
+  const control = textarea
+    ? `<textarea class="tableInput propertyInlineTextarea" data-open-part-field="${escapeHtml(field)}">${escapeHtml(value || "")}</textarea>`
+    : `<input class="tableInput propertyInlineInput" data-open-part-field="${escapeHtml(field)}" value="${escapeHtml(value || "")}">`;
+  return `
+    <dt>${escapeHtml(label)}</dt>
+    <dd>${control}</dd>
+  `;
+}
+
+function propertyEditSelectInline(label, field, value, options) {
+  return `
+    <dt>${escapeHtml(label)}</dt>
+    <dd>
+      <select class="tableInput propertyInlineInput" data-open-part-field="${escapeHtml(field)}">
+        ${options.map((option) => `<option value="${escapeHtml(option)}"${option === value ? " selected" : ""}>${escapeHtml(field === "lifecycle_state" ? stateLabel(option) : option)}</option>`).join("")}
+      </select>
+    </dd>
   `;
 }
 
@@ -1468,18 +1812,77 @@ function renderHistoryTab(part) {
 }
 
 function renderWorkflowTab(part) {
+  const maturityTransition = nextMaturityTransition(part);
+  const revisionTransition = nextRevisionTransition(part);
+  const maturityRule = maturityWorkflowRule(part, maturityTransition?.to);
+  const revisionRule = revisionWorkflowRule(part, revisionTransition?.to);
   return `
-    <section class="propertySection">
-      <h3>Workflow</h3>
-      <dl class="propertyGrid">
-        ${property("Release Status", releaseStatusLabel(part))}
-        ${property("Lifecycle", maturityStageLabel(part))}
-        ${property("Approvers", (part.approvers ?? []).length)}
-        ${property("Owner", updatedBy(part))}
+    <section class="propertySection workflowSection">
+      <h3>Product Maturity</h3>
+      ${workflowTimeline(maturityWorkflowStates, maturityStageValue(part), maturityStageText)}
+      <dl class="propertyGrid workflowGrid">
+        ${property("Current", maturityStageLabel(part))}
+        ${property("Scope", part.part_number)}
+        ${property("Next", maturityTransition ? maturityStageText(maturityTransition.to) : "No transition available")}
+        ${property("Approval", maturityTransition ? "Merge request" : "Complete")}
       </dl>
+      ${workflowCriteriaList(maturityRule)}
+      ${workflowActionButton(maturityTransition, maturityRule, `Transition to ${maturityTransition ? maturityStageText(maturityTransition.to) : ""}`, "maturity")}
+    </section>
+    <section class="propertySection workflowSection">
+      <h3>Revision Status</h3>
+      ${workflowTimeline(revisionWorkflowStates, revisionStatusValue(part), revisionStatusText)}
+      <dl class="propertyGrid workflowGrid">
+        ${property("Selected Revision", partObjectLabel(part))}
+        ${property("Current", releaseStatusLabel(part))}
+        ${property("Next", revisionTransition ? revisionStatusText(revisionTransition.to) : "No transition available")}
+        ${property("Approval", revisionTransition?.mode === "direct" ? "Direct remote push" : revisionTransition ? "Merge request" : "Complete")}
+      </dl>
+      ${workflowCriteriaList(revisionRule)}
+      ${workflowActionButton(revisionTransition, revisionRule, revisionTransition?.to === "release_candidate" ? "Set Release Candidate" : `Transition to ${revisionTransition ? revisionStatusText(revisionTransition.to) : ""}`, "revision")}
     </section>
     ${referenceSection("Approvers", part.approvers ?? [], approverReference)}
   `;
+}
+
+function workflowTimeline(states, current, labeler) {
+  const activeIndex = Math.max(0, states.indexOf(current));
+  const items = states.flatMap((state, index) => {
+    const isComplete = index <= activeIndex;
+    const isActive = index === activeIndex;
+    const cls = `timelineStep${isComplete ? " complete" : ""}${isActive ? " active" : ""}`;
+    const step = `
+      <div class="${cls}">
+        <div class="timelineStepMarker"><span class="timelineStepDot"></span></div>
+        <p class="timelineStepLabel">${escapeHtml(labeler(state))}</p>
+      </div>`;
+    const connector = index < states.length - 1
+      ? `<div class="timelineConnector${index < activeIndex ? " complete" : ""}"></div>`
+      : "";
+    return [step, connector];
+  });
+  return `<div class="maturityTimeline workflowTimeline">${items.join("")}<div class="timelineArrow" aria-hidden="true"></div></div>`;
+}
+
+function workflowActionButton(transition, rule, label, workflow) {
+  if (!transition) {
+    return "";
+  }
+  return `
+    <div class="workflowActions">
+      <button class="iconButton primaryAction formAction" type="button" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(transition.to)}"${rule.ready ? "" : " disabled"}>${escapeHtml(label)}</button>
+    </div>
+  `;
+}
+
+function workflowCriteriaList(rule) {
+  const items = rule.criteria.map((item) => `
+    <li class="${item.met ? "met" : "blocked"}">
+      <span class="workflowCriterionIcon" aria-hidden="true"></span>
+      <span>${escapeHtml(item.label)}</span>
+    </li>
+  `).join("");
+  return `<ul class="workflowCriteria">${items}</ul>`;
 }
 
 function detailSection(title, rows) {
@@ -1528,19 +1931,84 @@ function documentUrl(part, kind) {
   if (kind === "onshape") {
     return (part.onshape ?? [])[0]?.url || "";
   }
+  if (kind === "work") {
+    return (part.work_instructions ?? [])[0]?.url || "";
+  }
   const documents = [...(part.file_links ?? []), ...(part.documents ?? []), ...(part.attachments ?? [])];
   const match = documents.find((document) => {
     const haystack = [document.type, document.title, document.name].filter(Boolean).join(" ").toLowerCase();
     if (kind === "drive") {
       return haystack.includes("drive") || String(document.url || "").includes("drive.google.com");
     }
-    return haystack.includes("work") || haystack.includes("instruction");
+    return false;
   });
   return match?.url || (kind === "drive" ? documents[0]?.url || "" : "");
 }
 
 function attachmentsForPart(part) {
-  return [...(part.attachments ?? []), ...(part.documents ?? [])];
+  const seen = new Set();
+  return [...(part.attachments ?? []), ...(part.documents ?? [])].filter((record) => {
+    const key = `${record?.url || ""}|${record?.title || ""}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function renderAttachmentSections(part, { editable = false } = {}) {
+  const groups = groupedAttachments(part);
+  if (!groups.length) {
+    return `
+      <section class="propertySection attachmentTypeSection">
+        <h3>Attachments</h3>
+        <p class="description">No attachments linked.</p>
+      </section>
+    `;
+  }
+  return groups
+    .map(
+      ([type, records]) => `
+        <section class="propertySection attachmentTypeSection">
+          <h3>${escapeHtml(type)}</h3>
+          <div class="referenceList">
+            ${records.map((record) => fileReference(record, { editable })).join("")}
+          </div>
+        </section>
+      `
+    )
+    .join("");
+}
+
+function groupedAttachments(part) {
+  const groups = new Map();
+  attachmentsForPart(part).forEach((record) => {
+    const type = attachmentTypeLabel(record);
+    if (!groups.has(type)) {
+      groups.set(type, []);
+    }
+    groups.get(type).push(record);
+  });
+  return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+function attachmentTypeLabel(record) {
+  const raw = String(record?.type || record?.category || "OTHER").trim();
+  const normalized = raw
+    .replaceAll("_", " ")
+    .replaceAll("-", " ")
+    .toUpperCase();
+  if (normalized.includes("DRAWING")) return "DRAWINGS";
+  if (normalized.includes("TEST")) return "TEST REPORTS";
+  if (normalized.includes("ANALYSIS")) return "ANALYSIS";
+  if (normalized.includes("WORK") || normalized.includes("INSTRUCTION")) return "WORK INSTRUCTIONS";
+  if (normalized.includes("DRIVE") || normalized.includes("FILE") || normalized.includes("DOCUMENT")) return "DRAWINGS";
+  return normalized || "OTHER";
+}
+
+function attachmentRecordKey(record) {
+  return btoa(unescape(encodeURIComponent(`${record?.url || ""}|${record?.title || record?.name || ""}|${record?.type || ""}`)));
 }
 
 function createdBy(part) {
@@ -1565,13 +2033,34 @@ function releaseStatusLabel(part) {
   return labels[state] || stateLabel(state);
 }
 
+function revisionStatusValue(part) {
+  const state = String(part?.release_status || part?.lifecycle_state || "draft").toLowerCase();
+  return state === "in_review" ? "release_candidate" : state;
+}
+
+function revisionStatusText(state) {
+  return releaseStatusLabel({ release_status: state, lifecycle_state: state });
+}
+
+function isDraftRevision(part) {
+  return revisionStatusValue(part) === "draft";
+}
+
+function draftRevisionsForPart(partNumber, { excludeKey = "" } = {}) {
+  return parts.filter((part) => part.part_number === partNumber && partKey(part) !== excludeKey && isDraftRevision(part));
+}
+
+function currentEditorName() {
+  return localStorage.getItem("peakDefaultOwner") || "engineering@example.com";
+}
+
 function maturityStageLabel(part) {
   const maturity = String(part.maturity || "").toLowerCase();
   if (maturity === "npi") {
     return "NPI";
   }
   if (maturity === "production") {
-    return "Production";
+    return "Prod";
   }
   if (maturity === "sunset") {
     return "Sunset";
@@ -1587,7 +2076,7 @@ function maturityStageLabel(part) {
     return "NPI";
   }
   if (state === "released" || state === "production") {
-    return "Production";
+    return "Prod";
   }
   if (state === "sunset") {
     return "Sunset";
@@ -1599,7 +2088,139 @@ function maturityStageLabel(part) {
 }
 
 function maturityStageValue(part) {
-  return maturityStageLabel(part).toLowerCase();
+  const maturity = String(part?.maturity || "").toLowerCase();
+  if (maturity === "npi" || maturity === "production" || maturity === "sunset" || maturity === "obsolete" || maturity === "development") {
+    return maturity;
+  }
+  const state = String(part?.lifecycle_state || "").toLowerCase();
+  if (state === "npi") return "npi";
+  if (state === "released" || state === "production") return "production";
+  if (state === "sunset") return "sunset";
+  if (state === "obsolete") return "obsolete";
+  return "development";
+}
+
+function maturityStageText(state) {
+  const labels = {
+    development: "Development",
+    npi: "NPI",
+    production: "Prod",
+    sunset: "Sunset",
+    obsolete: "Obsolete"
+  };
+  return labels[state] || stateLabel(state);
+}
+
+function nextRevisionTransition(part) {
+  const current = revisionStatusValue(part);
+  const transitions = {
+    draft: { to: "release_candidate", mode: "direct" },
+    release_candidate: { to: "released", mode: "mr" },
+    released: { to: "obsolete", mode: "mr" }
+  };
+  return transitions[current] || null;
+}
+
+function nextMaturityTransition(part) {
+  const current = maturityStageValue(part);
+  const transitions = {
+    development: { to: "npi", mode: "mr" },
+    npi: { to: "production", mode: "mr" },
+    production: { to: "sunset", mode: "mr" },
+    sunset: { to: "obsolete", mode: "mr" }
+  };
+  return transitions[current] || null;
+}
+
+function revisionWorkflowRule(part, target) {
+  if (target === "release_candidate") {
+    return workflowRule([
+      ["Current revision is Draft", revisionStatusValue(part) === "draft"],
+      ["All required properties are set", partPropertiesComplete(part)],
+      ["Google Drive link is provided", Boolean(documentUrl(part, "drive"))],
+      ["Onshape link is provided", Boolean(documentUrl(part, "onshape"))]
+    ]);
+  }
+  if (target === "released") {
+    return workflowRule([
+      ["Current revision is Release Candidate", revisionStatusValue(part) === "release_candidate"]
+    ]);
+  }
+  if (target === "obsolete") {
+    return workflowRule([
+      ["Current revision is Released", revisionStatusValue(part) === "released"]
+    ]);
+  }
+  return workflowRule([]);
+}
+
+function maturityWorkflowRule(part, target) {
+  if (target === "npi") {
+    return workflowRule([
+      ["Current maturity is Development", maturityStageValue(part) === "development"],
+      ["At least one revision is Released", releasedRevisionsForPart(part.part_number).length > 0]
+    ]);
+  }
+  if (target === "production") {
+    return workflowRule([
+      ["Current maturity is NPI", maturityStageValue(part) === "npi"],
+      ["All required properties are set", partPropertiesComplete(part)],
+      ["Google Drive, Onshape, and WI links are present", allRequiredLinksPresent(part)]
+    ]);
+  }
+  if (target === "sunset") {
+    return workflowRule([
+      ["Current maturity is Prod", maturityStageValue(part) === "production"]
+    ]);
+  }
+  if (target === "obsolete") {
+    return workflowRule([
+      ["Current maturity is Sunset", maturityStageValue(part) === "sunset"]
+    ]);
+  }
+  return workflowRule([]);
+}
+
+function workflowRule(pairs) {
+  const criteria = pairs.map(([label, met]) => ({ label, met: Boolean(met) }));
+  return {
+    ready: criteria.every((item) => item.met),
+    criteria
+  };
+}
+
+function partPropertiesComplete(part) {
+  return [
+    part.part_number,
+    part.revision,
+    part.name,
+    part.description,
+    part.project,
+    part.traceability,
+    createdBy(part) !== "Not set" ? createdBy(part) : "",
+    part.created_at,
+    updatedBy(part) !== "Not set" ? updatedBy(part) : "",
+    part.updated_at
+  ].every((value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    return normalized && normalized !== "not set";
+  });
+}
+
+function allRequiredLinksPresent(part) {
+  return ["drive", "onshape", "work"].every((kind) => Boolean(documentUrl(part, kind)));
+}
+
+function releasedRevisionsForPart(partNumber) {
+  return parts.filter((part) => part.part_number === partNumber && revisionStatusValue(part) === "released");
+}
+
+function revisionWorkflowMrTitle(part) {
+  return `${part.part_number}^${part.revision || "A"}`;
+}
+
+function maturityWorkflowMrTitle(part, maturity) {
+  return `${part.part_number} - ${maturityStageText(maturity)}`;
 }
 
 function setFirstLinkedRecord(records, fallback, url, title, extra = {}) {
@@ -1607,6 +2228,21 @@ function setFirstLinkedRecord(records, fallback, url, title, extra = {}) {
     return records || [];
   }
   const next = [...asArray(records)];
+  next[0] = {
+    ...fallback,
+    ...extra,
+    title,
+    url
+  };
+  return next;
+}
+
+function replaceFirstLinkedRecord(records, fallback, url, title, extra = {}) {
+  const next = [...asArray(records)];
+  if (!url) {
+    next.shift();
+    return next;
+  }
   next[0] = {
     ...fallback,
     ...extra,
@@ -1625,7 +2261,7 @@ function basedOnLink(part) {
 }
 
 function renderMaturityProgress(part) {
-  const stages = ["Development", "NPI", "Production", "Sunset", "Obsolete"];
+  const stages = ["Development", "NPI", "Prod", "Sunset", "Obsolete"];
   const activeStage = maturityStageLabel(part);
   const activeIndex = Math.max(0, stages.indexOf(activeStage));
 
@@ -1757,13 +2393,19 @@ function bomReference(item) {
   `;
 }
 
-function fileReference(record) {
+function fileReference(record, { editable = false } = {}) {
   const title = record.title;
   const type = record.type;
   const id = record.google_drive_file_id || record.document_id || record.workspace_id || "No identifier";
+  const removeButton = editable
+    ? `<button class="iconButton attachmentRemoveButton" type="button" data-remove-attachment="${escapeHtml(attachmentRecordKey(record))}" title="Remove attachment" aria-label="Remove attachment"></button>`
+    : "";
   return `
     <article class="reference">
-      <strong><a href="${escapeHtml(record.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a></strong>
+      <div class="referenceHeader">
+        <strong><a href="${escapeHtml(record.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a></strong>
+        ${removeButton}
+      </div>
       <p>${escapeHtml(type)} | ${escapeHtml(id)}</p>
     </article>
   `;
@@ -1864,12 +2506,12 @@ function renderNavigationTree() {
   }
 
   if (activeNavMode === "projects") {
-    navigationTree.innerHTML = `
-      <div class="treeGroup">
-        <p>Projects</p>
-        ${projectNames.map((project) => `<button class="treeNode" type="button" data-filter-project="${escapeHtml(project)}">${escapeHtml(project)}</button>`).join("")}
-      </div>
-    `;
+    navigationTree.innerHTML = "";
+    return;
+  }
+
+  if (activeNavMode === "table") {
+    navigationTree.innerHTML = "";
     return;
   }
 
@@ -1941,10 +2583,6 @@ function renderBomTree() {
   }
 
   const childRows = renderBomChildren(rootPart, 1, new Set([partKey(rootPart)]));
-  const partOptions = parts
-    .filter((part) => partKey(part) !== partKey(rootPart))
-    .map((part) => `<option value="${escapeHtml(partKey(part))}">${escapeHtml(partObjectLabel(part))} - ${escapeHtml(part.name)}</option>`)
-    .join("");
   navigationTree.innerHTML = `
     <div class="bomGrid" role="treegrid" aria-label="BOM Structure">
       <div class="bomHeader" role="row">
@@ -1958,15 +2596,6 @@ function renderBomTree() {
         <span class="bomQty">1 each</span>
       </button>
       ${childRows || '<div class="treeEmpty">No child components</div>'}
-      ${
-        activePartEditMode
-          ? `<div class="bomAddRow">
-              <select class="tableInput" id="newBomPart">${partOptions}</select>
-              <input class="tableInput" id="newBomQty" value="1">
-              <button class="iconButton primaryAction" type="button" data-add-bom>Add</button>
-            </div>`
-          : ""
-      }
     </div>
   `;
 }
@@ -1977,25 +2606,32 @@ function renderBomChildren(parentPart, depth, visited) {
       const child = resolveBomChild(item);
       const childId = child ? partKey(child) : item.child_object_id || item.child_part_number;
       const active = selectedBomPartNumber === childId ? " active" : "";
+      const hasChildren = Boolean(child?.bom?.length);
+      const collapsed = hasChildren && collapsedBomNodes.has(childId);
+      const isRootBomChild = partKey(parentPart) === openedPartNumber;
+      const canEditThisItem = activePartEditMode && isRootBomChild;
       const children =
-        child && !visited.has(partKey(child))
+        child && hasChildren && !collapsed && !visited.has(partKey(child))
           ? renderBomChildren(child, depth + 1, new Set([...visited, partKey(child)]))
           : "";
+      const toggle = hasChildren
+        ? `<button class="bomCollapseButton${collapsed ? " collapsed" : ""}" type="button" data-toggle-bom-collapse="${escapeHtml(childId)}" title="${collapsed ? "Expand subassembly" : "Collapse subassembly"}" aria-label="${collapsed ? "Expand subassembly" : "Collapse subassembly"}"></button>`
+        : '<span class="bomCollapseSpacer" aria-hidden="true"></span>';
 
-      const row = activePartEditMode
-        ? `
-          <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row">
-            <button class="bomItem linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child ? partObjectLabel(child) : item.child_part_number)}</button>
+      const row = canEditThisItem
+          ? `
+          <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row" draggable="true">
+            <div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child ? partObjectLabel(child) : item.child_part_number)}</button></div>
+            <span class="bomName">${escapeHtml(child?.name ?? "External component")}</span>
             <input class="tableInput bomQtyInput" value="${escapeHtml(item.quantity)}" data-bom-qty="${escapeHtml(childId)}">
-            <button class="iconButton" type="button" data-remove-bom="${escapeHtml(childId)}">Remove</button>
           </div>
         `
         : `
-          <button class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" type="button" data-bom-part-number="${escapeHtml(childId)}" role="row">
-            <span class="bomItem">${escapeHtml(child ? partObjectLabel(child) : item.child_part_number)}</span>
+          <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row">
+            <div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child ? partObjectLabel(child) : item.child_part_number)}</button></div>
             <span class="bomName">${escapeHtml(child?.name ?? "External component")}</span>
             <span class="bomQty">${escapeHtml(item.quantity)} ${escapeHtml(item.unit)}</span>
-          </button>
+          </div>
         `;
       return `${row}${children}`;
     })
@@ -2036,6 +2672,10 @@ function projectDescription(project) {
   return customProjects.find((candidate) => candidate.name === project)?.description || `${project} project records`;
 }
 
+function projectDriveUrl(project) {
+  return customProjects.find((candidate) => candidate.name === project)?.drive_url || "";
+}
+
 function projectApprovers(project) {
   const custom = customProjects.find((candidate) => candidate.name === project);
   if (Array.isArray(custom?.approvers)) {
@@ -2064,6 +2704,7 @@ function applyNavMode(mode) {
   openedPartNumber = null;
   selectedBomPartNumber = null;
   activePartEditMode = false;
+  activeProjectEditMode = false;
   const url = new URL(window.location.href);
   url.searchParams.delete("part");
   url.searchParams.delete("object");
@@ -2077,7 +2718,7 @@ function applyNavMode(mode) {
     activeResultView = "grid";
   }
 
-  if (mode === "create" || mode === "projects" || mode === "sync" || mode === "report" || mode === "settings") {
+  if (mode === "create" || mode === "projects" || mode === "sync" || mode === "table" || mode === "report" || mode === "settings") {
     searchInput.value = "";
     stateFilter.value = "";
     projectFilter.value = "";
@@ -2096,6 +2737,7 @@ function openSelectedPart({ newTab = false, editMode = false } = {}) {
   openedPartNumber = selectedPartNumber;
   selectedBomPartNumber = selectedPartNumber;
   activePartEditMode = editMode;
+  activeAttachmentDraftCount = 0;
   activeNavMode = "part";
   window.history.replaceState({}, "", url);
   renderApp();
@@ -2111,6 +2753,7 @@ function moveToPart(partNumber, { editMode = false } = {}) {
   openedPartNumber = objectId;
   selectedBomPartNumber = objectId;
   activePartEditMode = editMode;
+  activeAttachmentDraftCount = 0;
   activeNavMode = "part";
   window.history.replaceState({}, "", partUrl(objectId, { editMode }));
   renderApp();
@@ -2133,14 +2776,18 @@ function partUrl(identifier, { editMode = false } = {}) {
 
 function syncChrome() {
   const isOpened = activeNavMode === "part";
-  const isSinglePane = ["create", "projects", "sync", "settings"].includes(activeNavMode);
+  const isSinglePane = ["create", "sync", "settings"].includes(activeNavMode);
   const isReportPane = activeNavMode === "report";
+  const isProjectPane = activeNavMode === "projects";
+  const isTablePane = activeNavMode === "table";
   document.body.classList.toggle("openedPartMode", isOpened);
   document.body.classList.toggle("searchMode", !isOpened);
   workspace.classList.toggle("partWorkspace", isOpened);
-  workspace.classList.toggle("partReadOnlyWorkspace", isOpened && !activePartEditMode);
+  workspace.classList.toggle("partReadOnlyWorkspace", isOpened);
   workspace.classList.toggle("singlePaneWorkspace", isSinglePane);
   workspace.classList.toggle("reportWorkspace", isReportPane);
+  workspace.classList.toggle("projectWorkspace", isProjectPane);
+  workspace.classList.toggle("tabularWorkspace", isTablePane);
 
   navItems.forEach((button) => {
     button.classList.toggle("active", button.dataset.navMode === activeNavMode);
@@ -2152,12 +2799,42 @@ function syncChrome() {
 function hidePartContextMenu() {
   partContextMenu.hidden = true;
   partContextMenu.dataset.partNumber = "";
+  partContextMenu.dataset.bomPartNumber = "";
+  partContextMenu.dataset.bomParentNumber = "";
+  partContextMenu.dataset.menuMode = "";
 }
 
 function showPartContextMenu(event, partNumber) {
   event.preventDefault();
   selectedPartNumber = partNumber;
+  partContextMenu.dataset.menuMode = "part";
   partContextMenu.dataset.partNumber = partNumber;
+  partContextMenu.dataset.bomPartNumber = "";
+  partContextMenu.innerHTML = `
+    <button type="button" role="menuitem" data-context-action="open">Open</button>
+    <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
+    <button type="button" role="menuitem" data-context-action="edit">Edit</button>
+  `;
+  positionContextMenu(event);
+}
+
+function showBomContextMenu(event, childIdentifier) {
+  event.preventDefault();
+  const rootPart = getOpenedPart();
+  const owner = childIdentifier ? findBomItemOwner(childIdentifier) : null;
+  const isDirectRootChild = Boolean(owner && rootPart && owner.parent === rootPart);
+  partContextMenu.dataset.menuMode = "bom";
+  partContextMenu.dataset.partNumber = "";
+  partContextMenu.dataset.bomPartNumber = childIdentifier || "";
+  partContextMenu.dataset.bomParentNumber = "";
+  partContextMenu.innerHTML = `
+    <button type="button" role="menuitem" data-context-action="bom-add">Add Component</button>
+    ${isDirectRootChild ? '<button type="button" role="menuitem" data-context-action="bom-delete">Delete Component</button>' : ""}
+  `;
+  positionContextMenu(event);
+}
+
+function positionContextMenu(event) {
   partContextMenu.style.left = `${event.clientX}px`;
   partContextMenu.style.top = `${event.clientY}px`;
   partContextMenu.hidden = false;
@@ -2189,6 +2866,27 @@ partsList.addEventListener("contextmenu", (event) => {
     return;
   }
   showPartContextMenu(event, row.dataset.partNumber);
+});
+
+navigationTree.addEventListener("contextmenu", (event) => {
+  if (!activePartEditMode || activeNavMode !== "part" || event.target.closest("input, select")) {
+    return;
+  }
+  if (!event.target.closest(".bomGrid")) {
+    return;
+  }
+  const bomNode = event.target.closest("[data-bom-part-number]");
+  const childIdentifier = bomNode?.classList.contains("root") ? "" : bomNode?.dataset.bomPartNumber || "";
+  if (childIdentifier) {
+    const owner = findBomItemOwner(childIdentifier);
+    if (!owner || owner.parent !== getOpenedPart()) {
+      event.preventDefault();
+      statusMessage = "Open the subassembly to edit its BOM";
+      renderApp();
+      return;
+    }
+  }
+  showBomContextMenu(event, childIdentifier);
 });
 
 partsList.addEventListener("input", (event) => {
@@ -2274,6 +2972,14 @@ partsList.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") {
     return;
   }
+  const projectRow = event.target.closest("[data-project-name]");
+  if (projectRow && activeNavMode === "projects") {
+    event.preventDefault();
+    selectedProjectName = projectRow.dataset.projectName;
+    activeProjectEditMode = false;
+    renderApp();
+    return;
+  }
   const row = event.target.closest("[data-part-number]");
   if (!row) {
     return;
@@ -2288,10 +2994,86 @@ partsList.addEventListener("keydown", (event) => {
 });
 
 partDetail.addEventListener("click", (event) => {
+  const cancelProjectEdit = event.target.closest("[data-cancel-project-edit]");
+  if (cancelProjectEdit) {
+    activeProjectEditMode = false;
+    renderApp();
+    return;
+  }
+
+  const saveSelectedProject = event.target.closest("[data-save-selected-project]");
+  if (saveSelectedProject) {
+    saveSelectedProjectFromDetail(saveSelectedProject.dataset.saveSelectedProject);
+    return;
+  }
+
+  const removeNewAttachment = event.target.closest("[data-remove-new-attachment]");
+  if (removeNewAttachment) {
+    removeNewAttachment.closest("[data-attachment-row]")?.remove();
+    return;
+  }
+
+  const removeAttachment = event.target.closest("[data-remove-attachment]");
+  if (removeAttachment) {
+    removeAttachment.closest(".reference")?.classList.toggle("isPendingRemoval");
+    removeAttachment.toggleAttribute("data-restore-attachment");
+    removeAttachment.title = removeAttachment.hasAttribute("data-restore-attachment") ? "Restore attachment" : "Remove attachment";
+    removeAttachment.setAttribute("aria-label", removeAttachment.title);
+    return;
+  }
+
+  const addAttachmentField = event.target.closest("[data-add-attachment-field]");
+  if (addAttachmentField) {
+    activeAttachmentDraftCount += 1;
+    const rows = document.querySelector("[data-attachment-edit-rows]");
+    rows?.insertAdjacentHTML("beforeend", attachmentEditRow(activeAttachmentDraftCount - 1));
+    return;
+  }
+
+  const partAction = event.target.closest("[data-part-action]");
+  if (partAction) {
+    if (activeNavMode === "projects") {
+      handleProjectAction(partAction.dataset.partAction);
+      return;
+    }
+    if (activeNavMode === "table") {
+      handleTabularAction(partAction.dataset.partAction);
+      return;
+    }
+    handlePartAction(partAction.dataset.partAction);
+    return;
+  }
+
+  const cancelPartEdit = event.target.closest("[data-cancel-part-edit]");
+  if (cancelPartEdit) {
+    activePartEditMode = false;
+    activeAttachmentDraftCount = 0;
+    if (openedPartNumber) {
+      window.history.replaceState({}, "", partUrl(openedPartNumber));
+    }
+    renderApp();
+    return;
+  }
+
+  const saveOpenPartButton = event.target.closest("[data-save-open-part]");
+  if (saveOpenPartButton) {
+    handleSaveOpenPart(saveOpenPartButton.dataset.saveOpenPart);
+    return;
+  }
+
   const propertyTab = event.target.closest("[data-property-tab]");
   if (propertyTab) {
     activePropertyTab = propertyTab.dataset.propertyTab;
+    if (activePropertyTab !== "attachments") {
+      activeAttachmentDraftCount = 0;
+    }
     renderApp();
+    return;
+  }
+
+  const workflowButton = event.target.closest("[data-workflow-action]");
+  if (workflowButton) {
+    runWorkflowTransition(workflowButton.dataset.workflowAction, workflowButton.dataset.workflowTo);
     return;
   }
 
@@ -2301,24 +3083,242 @@ partDetail.addEventListener("click", (event) => {
   }
   selectedPartNumber = button.dataset.partNumber;
   selectedBomPartNumber = button.dataset.partNumber;
+  activeAttachmentDraftCount = 0;
   if (openedPartNumber) {
     renderApp();
   }
 });
 
+function handlePartAction(action) {
+  const part = getSelectedBomPart() || getOpenedPart();
+  if (!part) {
+    return;
+  }
+
+  if (action === "open-drive") {
+    openPartLink(documentUrl(part, "drive"), "No Google Drive link is set for this part");
+    return;
+  }
+  if (action === "open-onshape") {
+    openPartLink(documentUrl(part, "onshape"), "No Onshape link is set for this part");
+    return;
+  }
+  if (action === "open-work") {
+    openPartLink(documentUrl(part, "work"), "No WI link is set for this part");
+    return;
+  }
+  if (action === "edit-part") {
+    if (!isDraftRevision(part)) {
+      statusMessage = "Only draft revisions can be edited";
+      renderApp();
+      return;
+    }
+    activePartEditMode = true;
+    activePropertyTab = "overview";
+    activeAttachmentDraftCount = 0;
+    window.history.replaceState({}, "", partUrl(partKey(part), { editMode: true }));
+    renderApp();
+    return;
+  }
+  if (action === "submit-workflow") {
+    activePartEditMode = false;
+    activePropertyTab = "workflow";
+    statusMessage = `Opened workflow for ${partObjectLabel(part)}`;
+    if (openedPartNumber) {
+      window.history.replaceState({}, "", partUrl(openedPartNumber));
+    }
+    renderApp();
+    return;
+  }
+  if (action === "copy-part-id") {
+    copyPartDetails(part);
+  }
+}
+
+function handleProjectAction(action) {
+  const project = selectedProjectName || projects()[0] || "";
+  if (!project) {
+    return;
+  }
+  if (action === "edit-project") {
+    activeProjectEditMode = true;
+    renderApp();
+    return;
+  }
+  if (action === "open-project-folder") {
+    openProjectFolder(project);
+    return;
+  }
+  if (action === "open-project-drive") {
+    openPartLink(projectDriveUrl(project), "No Google Drive link is set for this project");
+  }
+}
+
+function handleTabularAction(action) {
+  if (action === "import-tabular") {
+    importCsvFromPicker();
+    return;
+  }
+  if (action === "export-tabular-csv") {
+    exportTabularCsv();
+    return;
+  }
+  if (action === "export-tabular-json") {
+    exportPartsJson();
+  }
+}
+
+function runWorkflowTransition(workflow, target) {
+  const part = getSelectedBomPart() || getOpenedPart() || findPartByKey(selectedPartNumber);
+  if (!part || !target) {
+    return;
+  }
+
+  if (workflow === "revision") {
+    transitionRevisionWorkflow(part, target);
+    return;
+  }
+
+  if (workflow === "maturity") {
+    transitionMaturityWorkflow(part, target);
+  }
+}
+
+function transitionRevisionWorkflow(part, target) {
+  const transition = nextRevisionTransition(part);
+  if (!transition || transition.to !== target) {
+    statusMessage = `Cannot transition ${partObjectLabel(part)} to ${revisionStatusText(target)} from ${releaseStatusLabel(part)}.`;
+    renderApp();
+    return;
+  }
+  const rule = revisionWorkflowRule(part, target);
+  if (!rule.ready) {
+    statusMessage = firstBlockedWorkflowMessage(rule);
+    renderApp();
+    return;
+  }
+
+  stampPartRevision(part, target);
+  part.workflow = {
+    type: "revision",
+    status: target,
+    approval: transition.mode,
+    mr_title: transition.mode === "mr" ? revisionWorkflowMrTitle(part) : null,
+    updated_at: part.updated_at
+  };
+  part.revision_properties = {
+    ...(part.revision_properties || {}),
+    workflow: part.workflow
+  };
+  persistLocalChanges();
+  const label = partObjectLabel(part);
+  statusMessage = transition.mode === "direct"
+    ? `${label} set to ${revisionStatusText(target)}; direct remote push queued.`
+    : `${label} set to ${revisionStatusText(target)}; MR required with title "${revisionWorkflowMrTitle(part)}".`;
+  renderApp();
+}
+
+function transitionMaturityWorkflow(part, target) {
+  const transition = nextMaturityTransition(part);
+  if (!transition || transition.to !== target) {
+    statusMessage = `Cannot transition ${part.part_number} to ${maturityStageText(target)} from ${maturityStageLabel(part)}.`;
+    renderApp();
+    return;
+  }
+  const rule = maturityWorkflowRule(part, target);
+  if (!rule.ready) {
+    statusMessage = firstBlockedWorkflowMessage(rule);
+    renderApp();
+    return;
+  }
+
+  const editor = currentEditorName();
+  const today = new Date().toISOString().slice(0, 10);
+  const siblings = parts.filter((candidate) => candidate.part_number === part.part_number);
+  siblings.forEach((sibling) => {
+    sibling.maturity = target;
+    sibling.updated_by = editor;
+    sibling.owner = editor;
+    sibling.updated_at = today;
+    sibling.workflow = {
+      type: "maturity",
+      status: target,
+      approval: "mr",
+      mr_title: maturityWorkflowMrTitle(part, target),
+      updated_at: today
+    };
+    sibling.part_properties = {
+      ...(sibling.part_properties || {}),
+      maturity: target,
+      workflow: sibling.workflow
+    };
+  });
+  persistLocalChanges();
+  statusMessage = `${part.part_number} maturity set to ${maturityStageText(target)}; MR required with title "${maturityWorkflowMrTitle(part, target)}".`;
+  renderApp();
+}
+
+function stampPartRevision(part, status) {
+  const editor = currentEditorName();
+  const today = new Date().toISOString().slice(0, 10);
+  part.lifecycle_state = status;
+  part.release_status = status;
+  part.updated_by = editor;
+  part.owner = editor;
+  part.updated_at = today;
+  part.revision_properties = {
+    ...(part.revision_properties || {}),
+    release_status: status,
+    lifecycle_state: status,
+    owner: part.owner,
+    updated_by: part.updated_by,
+    updated_at: part.updated_at
+  };
+}
+
+function firstBlockedWorkflowMessage(rule) {
+  const blocked = rule.criteria.find((item) => !item.met);
+  return blocked ? `Workflow blocked: ${blocked.label}.` : "Workflow transition is not available.";
+}
+
+function openProjectFolder(project) {
+  activeNavMode = "home";
+  activeProjectEditMode = false;
+  searchInput.value = "";
+  stateFilter.value = "";
+  projectFilter.value = project;
+  statusMessage = `Opened project folder ${project}`;
+  renderApp();
+}
+
+function openPartLink(url, missingMessage) {
+  if (!url) {
+    statusMessage = missingMessage;
+    renderApp();
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function copyPartDetails(part) {
+  const text = `${part.part_number}^${part.revision || "A"} - ${part.name || ""}`;
+  try {
+    await navigator.clipboard.writeText(text);
+    statusMessage = `Copied ${text}`;
+  } catch {
+    statusMessage = text;
+  }
+  renderApp();
+}
+
 navigationTree.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-add-bom], [data-remove-bom], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
+  const button = event.target.closest("[data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
   if (!button) {
     return;
   }
 
-  if (button.dataset.addBom !== undefined) {
-    addBomFromForm();
-    return;
-  }
-
-  if (button.dataset.removeBom) {
-    removeBomItem(button.dataset.removeBom);
+  if (button.dataset.toggleBomCollapse) {
+    toggleBomCollapse(button.dataset.toggleBomCollapse);
     return;
   }
 
@@ -2390,6 +3390,44 @@ navigationTree.addEventListener("change", (event) => {
   updateBomQuantity(quantityInput.dataset.bomQty, quantityInput.value);
 });
 
+navigationTree.addEventListener("dragstart", (event) => {
+  const row = event.target.closest(".bomNode.child[draggable='true']");
+  if (!row || !activePartEditMode) {
+    return;
+  }
+  row.classList.add("isDragging");
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", row.dataset.bomPartNumber);
+});
+
+navigationTree.addEventListener("dragover", (event) => {
+  const row = event.target.closest(".bomNode.child[draggable='true']");
+  if (!row || !activePartEditMode) {
+    return;
+  }
+  event.preventDefault();
+  row.classList.add("isDropTarget");
+  event.dataTransfer.dropEffect = "move";
+});
+
+navigationTree.addEventListener("dragleave", (event) => {
+  event.target.closest(".bomNode.child")?.classList.remove("isDropTarget");
+});
+
+navigationTree.addEventListener("drop", (event) => {
+  const row = event.target.closest(".bomNode.child[draggable='true']");
+  if (!row || !activePartEditMode) {
+    return;
+  }
+  event.preventDefault();
+  const sourceId = event.dataTransfer.getData("text/plain");
+  const targetId = row.dataset.bomPartNumber;
+  clearBomDragState();
+  reorderBomItem(sourceId, targetId);
+});
+
+navigationTree.addEventListener("dragend", clearBomDragState);
+
 searchInput.addEventListener("input", () => {
   if (openedPartNumber) {
     renderSearchSuggestions();
@@ -2422,6 +3460,20 @@ partContextMenu.addEventListener("click", (event) => {
   if (!actionButton) {
     return;
   }
+  if (partContextMenu.dataset.menuMode === "bom") {
+    const childIdentifier = partContextMenu.dataset.bomPartNumber;
+    const parentIdentifier = partContextMenu.dataset.bomParentNumber;
+    hidePartContextMenu();
+    if (actionButton.dataset.contextAction === "bom-add") {
+      addBomFromForm(parentIdentifier);
+      return;
+    }
+    if (actionButton.dataset.contextAction === "bom-delete" && childIdentifier) {
+      removeBomItem(childIdentifier);
+      return;
+    }
+    return;
+  }
   const partNumber = partContextMenu.dataset.partNumber;
   if (!partNumber) {
     return;
@@ -2449,6 +3501,38 @@ stateFilter.addEventListener("change", renderApp);
 projectFilter.addEventListener("change", renderApp);
 csvImportFile?.addEventListener("change", () => importPartsCsvFile(csvImportFile.files?.[0]));
 
+tableHead.addEventListener("click", (event) => {
+  const sortButton = event.target.closest("[data-table-sort]");
+  if (!sortButton || activeNavMode !== "table") {
+    return;
+  }
+  const column = sortButton.dataset.tableSort;
+  activeTableSort = {
+    column,
+    direction: activeTableSort.column === column && activeTableSort.direction === "asc" ? "desc" : "asc"
+  };
+  renderApp();
+});
+
+tableHead.addEventListener("input", (event) => {
+  const filterInput = event.target.closest("[data-table-filter]");
+  if (!filterInput || activeNavMode !== "table") {
+    return;
+  }
+  tableColumnFilters = {
+    ...tableColumnFilters,
+    [filterInput.dataset.tableFilter]: filterInput.value
+  };
+  const filterKey = filterInput.dataset.tableFilter;
+  const cursor = filterInput.selectionStart ?? filterInput.value.length;
+  renderSearchWorkspace();
+  enableColumnResizing();
+  syncChrome();
+  const nextInput = tableHead.querySelector(`[data-table-filter="${CSS.escape(filterKey)}"]`);
+  nextInput?.focus();
+  nextInput?.setSelectionRange(cursor, cursor);
+});
+
 navItems.forEach((button) => {
   button.addEventListener("click", () => {
     activeNavMode = button.dataset.navMode;
@@ -2461,6 +3545,14 @@ navItems.forEach((button) => {
 });
 
 partsList.addEventListener("click", (event) => {
+  const projectCard = event.target.closest("[data-project-name]");
+  if (projectCard && activeNavMode === "projects") {
+    selectedProjectName = projectCard.dataset.projectName;
+    activeProjectEditMode = false;
+    renderApp();
+    return;
+  }
+
   const basedOnButton = event.target.closest("[data-based-on-part]");
   if (basedOnButton) {
     const input = document.querySelector("#newPartBasedOn");
@@ -2509,7 +3601,7 @@ partsList.addEventListener("click", (event) => {
 
   const saveOpenPartButton = event.target.closest("[data-save-open-part]");
   if (saveOpenPartButton) {
-    saveOpenPartFromForm(saveOpenPartButton.dataset.saveOpenPart);
+    handleSaveOpenPart(saveOpenPartButton.dataset.saveOpenPart);
     return;
   }
 
@@ -2722,6 +3814,54 @@ function enableBomColumnResizing() {
   });
 }
 
+function enablePaneResizing() {
+  const leftHandle = document.querySelector(".resizeHandleLeft");
+  const rightHandle = document.querySelector(".resizeHandleRight");
+
+  function wire(handle, getDragHandler) {
+    if (!handle || handle.dataset.paneResizeReady === "true") return;
+    handle.dataset.paneResizeReady = "true";
+    handle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      document.body.classList.add("isResizing");
+      const { onMove } = getDragHandler(event.clientX);
+      function onUp(upEvent) {
+        handle.releasePointerCapture(upEvent.pointerId);
+        document.body.classList.remove("isResizing");
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+      }
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+    });
+  }
+
+  wire(leftHandle, (startX) => {
+    const startWidth = document.querySelector(".navigatorPane")?.getBoundingClientRect().width ?? 270;
+    return {
+      onMove(e) {
+        workspace.style.setProperty("--nav-width", `${clamp(startWidth + e.clientX - startX, 160, 600)}px`);
+      }
+    };
+  });
+
+  wire(rightHandle, (startX) => {
+    const isProject = workspace.classList.contains("projectWorkspace");
+    const startWidth = document.querySelector(".resultsPane")?.getBoundingClientRect().width ?? 280;
+    return {
+      onMove(e) {
+        const width = clamp(startWidth + e.clientX - startX, 200, 900);
+        if (isProject) {
+          workspace.style.setProperty("--project-results-width", `${width}px`);
+        } else {
+          workspace.style.setProperty("--results-width", `${width}px`);
+        }
+      }
+    };
+  });
+}
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -2826,6 +3966,12 @@ function createRevisionFromForm() {
     renderApp();
     return;
   }
+  const existingDraft = draftRevisionsForPart(partNumber)[0];
+  if (existingDraft) {
+    statusMessage = `Cannot create a new draft revision for ${partNumber}; ${partObjectLabel(existingDraft)} is already draft.`;
+    renderApp();
+    return;
+  }
   if (!revision || parts.some((part) => part.part_number === partNumber && part.revision === revision)) {
     statusMessage = "Next revision is not available";
     renderApp();
@@ -2916,11 +4062,23 @@ function savePartFromRow(originalPartNumber) {
 function saveProjectFromRow(originalProject) {
   const fields = document.querySelectorAll(`[data-edit-project="${CSS.escape(originalProject)}"]`);
   const values = Object.fromEntries([...fields].map((field) => [field.dataset.field, field.value.trim()]));
+  saveProjectValues(originalProject, values);
+}
+
+function saveSelectedProjectFromDetail(originalProject) {
+  const fields = document.querySelectorAll("[data-selected-project-field]");
+  const values = Object.fromEntries([...fields].map((field) => [field.dataset.selectedProjectField, field.value.trim()]));
+  activeProjectEditMode = false;
+  saveProjectValues(originalProject, values);
+}
+
+function saveProjectValues(originalProject, values) {
   const existing = customProjects.find((project) => project.name === originalProject);
   if (existing) {
     existing.key = values.key || existing.key || projectKey(originalProject);
     existing.owner = values.owner || "engineering@example.com";
     existing.description = values.description || "";
+    existing.drive_url = values.drive_url || "";
     existing.approvers = (values.approvers || "").split(",").map((value) => value.trim()).filter(Boolean);
   } else {
     customProjects.push({
@@ -2928,6 +4086,7 @@ function saveProjectFromRow(originalProject) {
       key: values.key || projectKey(originalProject),
       owner: values.owner || "engineering@example.com",
       description: values.description || "",
+      drive_url: values.drive_url || "",
       approvers: (values.approvers || "").split(",").map((value) => value.trim()).filter(Boolean)
     });
   }
@@ -2937,46 +4096,66 @@ function saveProjectFromRow(originalProject) {
   renderApp();
 }
 
-function saveOpenPartFromForm(originalPartNumber) {
+async function handleSaveOpenPart(originalPartNumber) {
+  try {
+    await saveOpenPartFromForm(originalPartNumber);
+  } catch (error) {
+    statusMessage = `Save failed: ${error.message}`;
+    renderApp();
+  }
+}
+
+async function saveOpenPartFromForm(originalPartNumber) {
   const part = findPartByKey(originalPartNumber);
   if (!part) {
     return;
   }
+  if (!isDraftRevision(part)) {
+    activePartEditMode = false;
+    statusMessage = "Only draft revisions can be edited";
+    renderApp();
+    return;
+  }
   const fields = document.querySelectorAll("[data-open-part-field]");
   const values = Object.fromEntries([...fields].map((field) => [field.dataset.openPartField, field.value.trim()]));
-  if (!values.part_number || !values.name || !values.project || !values.revision) {
-    statusMessage = "Part number, name, project, and revision are required";
+  values.name ??= part.name || "";
+  values.description ??= part.description || "";
+  values.traceability ??= part.traceability || "";
+  values.maturity = part.maturity || maturityStageValue(part);
+  values.driveUrl ??= documentUrl(part, "drive");
+  values.onshapeUrl ??= documentUrl(part, "onshape");
+  values.workUrl ??= documentUrl(part, "work");
+  values.approvers ??= (part.approvers ?? []).map((approver) => approver.name || approver).join(", ");
+  values.change_summary ??= part.change_summary || "";
+  if (!values.name) {
+    statusMessage = "Part name is required";
     renderApp();
     return;
   }
   const siblingParts = parts.filter((candidate) => candidate.part_number === part.part_number);
-  if (values.part_number !== part.part_number && parts.some((candidate) => candidate.part_number === values.part_number)) {
-    statusMessage = `${values.part_number} already exists`;
-    renderApp();
-    return;
-  }
-  const oldPartNumber = part.part_number;
-  const stableFileLinks = setFirstLinkedRecord(part.file_links, { type: "linked_file", google_drive_file_id: driveIdFromUrl(values.driveUrl) }, values.driveUrl, `${values.name} File`, {
+  const editor = currentEditorName();
+  const today = new Date().toISOString().slice(0, 10);
+  const stableFileLinks = replaceFirstLinkedRecord(part.file_links, { type: "linked_file", google_drive_file_id: driveIdFromUrl(values.driveUrl) }, values.driveUrl, `${values.name} File`, {
     google_drive_file_id: driveIdFromUrl(values.driveUrl)
   });
-  const stableOnshape = setFirstLinkedRecord(part.onshape, { type: "linked_object", document_id: onshapeDocumentIdFromUrl(values.onshapeUrl), workspace_id: "linked-workspace", element_id: "linked-element" }, values.onshapeUrl, `${values.name} Onshape`, {
+  const stableOnshape = replaceFirstLinkedRecord(part.onshape, { type: "linked_object", document_id: onshapeDocumentIdFromUrl(values.onshapeUrl), workspace_id: "linked-workspace", element_id: "linked-element" }, values.onshapeUrl, `${values.name} Onshape`, {
     document_id: onshapeDocumentIdFromUrl(values.onshapeUrl),
     workspace_id: "linked-workspace",
     element_id: "linked-element"
   });
+  const stableWorkInstructions = replaceFirstLinkedRecord(part.work_instructions, { type: "work_instruction" }, values.workUrl, `${values.name} WI`);
   siblingParts.forEach((sibling) => {
-    sibling.part_number = values.part_number;
     sibling.name = values.name;
-    sibling.project = values.project;
     sibling.description = values.description || "";
     sibling.traceability = values.traceability || "";
     sibling.maturity = values.maturity || sibling.maturity || "development";
     sibling.file_links = stableFileLinks;
     sibling.onshape = stableOnshape;
+    sibling.work_instructions = stableWorkInstructions;
     sibling.part_properties = {
       ...(sibling.part_properties || {}),
       schema: "peak.part.v2",
-      part_number: values.part_number,
+      part_number: sibling.part_number,
       name: sibling.name,
       description: sibling.description,
       category: sibling.category || "general",
@@ -2984,123 +4163,230 @@ function saveOpenPartFromForm(originalPartNumber) {
       traceability: sibling.traceability,
       maturity: sibling.maturity,
       onshape: sibling.onshape,
-      work_instructions: sibling.work_instructions || [],
+      work_instructions: sibling.work_instructions,
       file_links: sibling.file_links,
       tags: sibling.tags || [],
       manufacturers: sibling.manufacturers || [],
-      revisions: siblingParts.map((revisionPart) => `${values.part_number}^${revisionPart === part ? values.revision : revisionPart.revision || "A"}.json`)
+      revisions: siblingParts.map((revisionPart) => `${sibling.part_number}^${revisionPart.revision || "A"}.json`)
     };
   });
-  part.lifecycle_state = values.lifecycle_state;
-  part.release_status = values.lifecycle_state;
-  part.revision = values.revision || part.revision;
-  part.owner = values.owner || localStorage.getItem("peakDefaultOwner") || "engineering@example.com";
+  const approvers = values.approvers
+    ? values.approvers.split(",").map((name) => ({ name: name.trim() })).filter((approver) => approver.name)
+    : [];
+  const newAttachments = attachmentRowsFromForm();
+  if (newAttachments === null) {
+    renderApp();
+    return;
+  }
+  const removedAttachmentKeys = attachmentRemovalKeysFromForm();
+  part.lifecycle_state = revisionStatusValue(part);
+  part.release_status = part.lifecycle_state;
+  part.owner = editor;
+  part.updated_by = editor;
   part.change_summary = values.change_summary || "";
-  part.updated_at = new Date().toISOString().slice(0, 10);
+  part.updated_at = today;
+  part.approvers = approvers;
+  if (removedAttachmentKeys.length) {
+    part.attachments = removeAttachmentRecords(part.attachments, removedAttachmentKeys);
+    part.documents = removeAttachmentRecords(part.documents, removedAttachmentKeys);
+  }
+  if (newAttachments.length) {
+    part.attachments = [...asArray(part.attachments), ...newAttachments];
+  }
   part.revision_properties = {
     ...(part.revision_properties || {}),
     schema: "peak.revision.v1",
-    object_id: `${values.part_number}^${part.revision || "A"}`,
-    part_number: values.part_number,
+    object_id: partKey(part),
+    part_number: part.part_number,
     revision: part.revision || "A",
     release_status: part.release_status,
     lifecycle_state: part.lifecycle_state,
     owner: part.owner,
     created_by: part.created_by || part.owner,
     created_at: part.created_at,
-    updated_by: part.owner,
+    updated_by: part.updated_by,
     updated_at: part.updated_at,
     based_on: part.based_on || null,
-    approvers: part.approvers || [],
+    approvers: part.approvers,
     bom: part.bom || [],
     attachments: part.attachments || [],
     change_summary: part.change_summary
   };
-  parts.forEach((candidate) => {
-    (candidate.bom ?? []).forEach((item) => {
-      if (item.child_part_number === oldPartNumber) {
-        item.child_part_number = part.part_number;
-        if (item.child_object_id) {
-          item.child_object_id = `${part.part_number}^${item.child_revision || part.revision || "A"}`;
-        }
-      }
-    });
-  });
   siblingParts.forEach((sibling) => {
     sibling.object_id = `${sibling.part_number}^${sibling.revision || "A"}`;
   });
   selectedPartNumber = partKey(part);
   selectedBomPartNumber = partKey(part);
   openedPartNumber = partKey(part);
-  persistLocalChanges();
-  statusMessage = `Saved ${partObjectLabel(part)}`;
-  window.history.replaceState({}, "", partUrl(partKey(part), { editMode: activePartEditMode }));
+  activePartEditMode = false;
+  activeAttachmentDraftCount = 0;
+  statusMessage = `Saved ${partObjectLabel(part)} locally; pushing draft edit to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  window.history.replaceState({}, "", partUrl(partKey(part)));
   renderProjectOptions();
   renderApp();
+  await persistLocalChanges();
+  await pushDraftPartChangesToGithub(part);
 }
 
-function addBomFromForm() {
-  const rootPart = getOpenedPart();
-  const childObjectId = document.querySelector("#newBomPart")?.value;
-  const childPart = findPartByKey(childObjectId);
-  const quantity = Number(document.querySelector("#newBomQty")?.value || 1);
-  if (!rootPart || !childPart) {
-    return;
+function attachmentRowsFromForm() {
+  const rows = [...document.querySelectorAll("[data-attachment-row]")];
+  const attachments = [];
+  for (const row of rows) {
+    const values = Object.fromEntries(
+      [...row.querySelectorAll("[data-attachment-field]")].map((field) => [field.dataset.attachmentField, field.value.trim()])
+    );
+    if (!values.title && !values.url) {
+      continue;
+    }
+    if (!values.title || !values.url) {
+      statusMessage = "Attachment title and link are required";
+      return null;
+    }
+    const type = attachmentTypeLabel({ type: values.type || "OTHER" });
+    attachments.push({
+      type,
+      title: values.title,
+      url: values.url
+    });
   }
-  rootPart.bom = rootPart.bom || [];
-  if (rootPart.bom.some((item) => (resolveBomChild(item) ? partKey(resolveBomChild(item)) === partKey(childPart) : item.child_object_id === partKey(childPart)))) {
-    statusMessage = `${partObjectLabel(childPart)} is already in the BOM`;
+  return attachments;
+}
+
+function attachmentRemovalKeysFromForm() {
+  return [...document.querySelectorAll("[data-remove-attachment][data-restore-attachment]")]
+    .map((button) => button.dataset.removeAttachment)
+    .filter(Boolean);
+}
+
+function removeAttachmentRecords(records, removalKeys) {
+  const removalSet = new Set(removalKeys);
+  return asArray(records).filter((record) => !removalSet.has(attachmentRecordKey(record)));
+}
+
+function addBomFromForm(parentIdentifier = "") {
+  const rootPart = getOpenedPart();
+  const parentPart = parentIdentifier ? findPartByKey(parentIdentifier) : rootPart;
+  const childObjectId = prompt("Part number or Part ID to add");
+  const childPart = findPartByKey(childObjectId);
+  if (!parentPart || !childPart) {
+    statusMessage = "Select a valid part to add";
     renderApp();
     return;
   }
-  rootPart.bom.push({
+  const quantity = Number(prompt("Quantity", "1") || 1);
+  parentPart.bom = parentPart.bom || [];
+  if (parentPart.bom.some((item) => (resolveBomChild(item) ? partKey(resolveBomChild(item)) === partKey(childPart) : item.child_object_id === partKey(childPart)))) {
+    statusMessage = `${partObjectLabel(childPart)} is already in this BOM`;
+    renderApp();
+    return;
+  }
+  parentPart.bom.push({
     child_object_id: partKey(childPart),
     child_part_number: childPart.part_number,
     child_revision: childPart.revision,
     quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
     unit: "each"
   });
-  rootPart.updated_at = new Date().toISOString().slice(0, 10);
+  parentPart.updated_at = new Date().toISOString().slice(0, 10);
   persistLocalChanges();
-  statusMessage = `Added ${partObjectLabel(childPart)} to ${partObjectLabel(rootPart)}`;
+  statusMessage = `Added ${partObjectLabel(childPart)} to ${partObjectLabel(parentPart)}`;
+  renderApp();
+}
+
+function toggleBomCollapse(partIdentifier) {
+  if (collapsedBomNodes.has(partIdentifier)) {
+    collapsedBomNodes.delete(partIdentifier);
+  } else {
+    collapsedBomNodes.add(partIdentifier);
+  }
   renderApp();
 }
 
 function removeBomItem(childIdentifier) {
-  const rootPart = getOpenedPart();
-  if (!rootPart) {
+  const owner = findBomItemOwner(childIdentifier);
+  if (!owner) {
     return;
   }
-  rootPart.bom = (rootPart.bom || []).filter((item) => {
-    const child = resolveBomChild(item);
-    return (child ? partKey(child) : item.child_object_id || item.child_part_number) !== childIdentifier;
-  });
-  rootPart.updated_at = new Date().toISOString().slice(0, 10);
+  owner.parent.bom = (owner.parent.bom || []).filter((item) => bomItemIdentifier(item) !== childIdentifier);
+  owner.parent.updated_at = new Date().toISOString().slice(0, 10);
   persistLocalChanges();
   statusMessage = `Removed ${childIdentifier}`;
   renderApp();
 }
 
 function updateBomQuantity(childIdentifier, rawQuantity) {
-  const rootPart = getOpenedPart();
-  const item = rootPart?.bom?.find((candidate) => {
-    const child = resolveBomChild(candidate);
-    return (child ? partKey(child) : candidate.child_object_id || candidate.child_part_number) === childIdentifier;
-  });
+  const owner = findBomItemOwner(childIdentifier);
+  const item = owner?.item;
   const quantity = Number(rawQuantity);
   if (!item || !Number.isFinite(quantity) || quantity <= 0) {
     return;
   }
   item.quantity = quantity;
-  rootPart.updated_at = new Date().toISOString().slice(0, 10);
+  owner.parent.updated_at = new Date().toISOString().slice(0, 10);
   persistLocalChanges();
   statusMessage = `Updated ${childIdentifier} quantity`;
   renderApp();
 }
 
+function reorderBomItem(sourceIdentifier, targetIdentifier) {
+  if (!sourceIdentifier || !targetIdentifier || sourceIdentifier === targetIdentifier) {
+    return;
+  }
+  const sourceOwner = findBomItemOwner(sourceIdentifier);
+  const targetOwner = findBomItemOwner(targetIdentifier);
+  if (!sourceOwner || !targetOwner || sourceOwner.parent !== targetOwner.parent) {
+    statusMessage = "Drag within the same BOM level to reorder";
+    renderApp();
+    return;
+  }
+  const bom = sourceOwner.parent.bom || [];
+  const sourceIndex = sourceOwner.index;
+  const targetIndex = targetOwner.index;
+  if (sourceIndex < 0 || targetIndex < 0) {
+    return;
+  }
+  const [moved] = bom.splice(sourceIndex, 1);
+  bom.splice(targetIndex, 0, moved);
+  sourceOwner.parent.updated_at = new Date().toISOString().slice(0, 10);
+  persistLocalChanges();
+  statusMessage = `Moved ${sourceIdentifier}`;
+  renderApp();
+}
+
+function findBomItemOwner(childIdentifier, parent = getOpenedPart(), visited = new Set()) {
+  if (!parent || visited.has(partKey(parent))) {
+    return null;
+  }
+  visited.add(partKey(parent));
+  const bom = parent.bom || [];
+  const index = bom.findIndex((item) => bomItemIdentifier(item) === childIdentifier);
+  if (index >= 0) {
+    return { parent, item: bom[index], index };
+  }
+  for (const item of bom) {
+    const child = resolveBomChild(item);
+    const owner = findBomItemOwner(childIdentifier, child, visited);
+    if (owner) {
+      return owner;
+    }
+  }
+  return null;
+}
+
+function bomItemIdentifier(item) {
+  const child = resolveBomChild(item);
+  return child ? partKey(child) : item.child_object_id || item.child_part_number;
+}
+
+function clearBomDragState() {
+  document.querySelectorAll(".bomNode.isDragging, .bomNode.isDropTarget").forEach((row) => {
+    row.classList.remove("isDragging", "isDropTarget");
+  });
+}
+
 function showSyncAction(action) {
   if (action === "pull") {
-    statusMessage = "Pull requires a local Git bridge: git pull origin master";
+    statusMessage = `Pull requires a local Git bridge: git pull origin ${productDataGithubBranch}`;
   } else if (action === "import-csv") {
     importCsvFromPicker();
     return;
@@ -3117,7 +4403,15 @@ function showSyncAction(action) {
 }
 
 function saveSettingsFromForm() {
-  statusMessage = productDataDirectoryHandle ? `Using product data folder ${productDataFolderName}` : "Select a product data folder to load PEAK data";
+  const token = document.querySelector("#settingsGithubToken")?.value.trim() || "";
+  if (token) {
+    localStorage.setItem("peakGithubToken", token);
+  } else {
+    localStorage.removeItem("peakGithubToken");
+  }
+  statusMessage = productDataDirectoryHandle
+    ? `Using product data folder ${productDataFolderName}; remote ${productDataGithubOwner}/${productDataGithubRepo}`
+    : "Select a product data folder to load PEAK data";
   renderApp();
 }
 
@@ -3215,6 +4509,7 @@ function createPartRecord(values, options = {}) {
     owner: values.owner,
     tags: [],
     onshape: onshapeLinks,
+    work_instructions: [],
     file_links: fileLinks,
     documents: [],
     attachments: [],
@@ -3248,8 +4543,13 @@ function createRevisionRecord(source, revision) {
   if (!source || !revision) {
     return false;
   }
+  const existingDraft = draftRevisionsForPart(source.part_number)[0];
+  if (existingDraft) {
+    statusMessage = `Cannot create a new draft revision for ${source.part_number}; ${partObjectLabel(existingDraft)} is already draft.`;
+    return false;
+  }
   const today = new Date().toISOString().slice(0, 10);
-  const owner = localStorage.getItem("peakDefaultOwner") || source.owner || "engineering@example.com";
+  const owner = currentEditorName() || source.owner || "engineering@example.com";
   const revisionProperties = {
     schema: "peak.revision.v1",
     object_id: `${source.part_number}^${revision}`,
@@ -3539,6 +4839,16 @@ function exportPartsCsv() {
   renderApp();
 }
 
+function exportTabularCsv() {
+  const headers = tabularColumns.map((column) => column.label);
+  const rows = tabularParts(filteredParts()).map((part) =>
+    tabularColumns.map((column) => tabularColumnValue(part, column))
+  );
+  downloadTextFile(`peak-table-${new Date().toISOString().slice(0, 10)}.csv`, toCsv([headers, ...rows]), "text/csv");
+  statusMessage = "Exported table CSV";
+  renderApp();
+}
+
 function exportPartsJson() {
   downloadTextFile(
     `peak-working-copy-${new Date().toISOString().slice(0, 10)}.json`,
@@ -3654,7 +4964,7 @@ function persistLocalChanges() {
   localStorage.setItem("peakHasLocalChanges", "true");
   saveProjects();
   hasRepoChanges = true;
-  persistProductDataFolderChanges();
+  return persistProductDataFolderChanges();
 }
 
 async function persistProductDataFolderChanges() {
@@ -3678,26 +4988,140 @@ async function persistProductDataFolderChanges() {
 }
 
 async function writeProductDataSnapshot(directoryHandle) {
+  await Promise.all(
+    productDataSnapshotFiles().map((file) => writeJsonToDirectory(directoryHandle, file.path, file.value))
+  );
+}
+
+function productDataSnapshotFiles() {
   const groups = groupedPartResults(parts);
   const today = new Date().toISOString().slice(0, 10);
+  const files = [];
   const manifest = {
     schema: "peak.parts.manifest.v2",
     updated_at: today,
     projects: "projects.json",
     parts: groups.map((group) => `parts/${group.part_number}/${group.part_number}.json`)
   };
-  await Promise.all(
-    groups.map(async (group) => {
-      const revisions = group.revisions;
-      const partProperties = productPartProperties(group.part_number, revisions);
-      await writeJsonToDirectory(directoryHandle, `parts/${group.part_number}/${group.part_number}.json`, partProperties);
-      await Promise.all(
-        revisions.map((part) => writeJsonToDirectory(directoryHandle, `parts/${group.part_number}/${group.part_number}^${part.revision || "A"}.json`, productRevisionProperties(part)))
-      );
-    })
-  );
-  await writeJsonToDirectory(directoryHandle, "projects.json", productProjectsPayload());
-  await writeJsonToDirectory(directoryHandle, "manifest.json", manifest);
+  groups.forEach((group) => {
+    const revisions = group.revisions;
+    files.push({
+      path: `parts/${group.part_number}/${group.part_number}.json`,
+      value: productPartProperties(group.part_number, revisions)
+    });
+    revisions.forEach((part) => {
+      files.push({
+        path: `parts/${group.part_number}/${group.part_number}^${part.revision || "A"}.json`,
+        value: productRevisionProperties(part)
+      });
+    });
+  });
+  files.push({ path: "projects.json", value: productProjectsPayload() });
+  files.push({ path: "manifest.json", value: manifest });
+  return files;
+}
+
+async function pushDraftPartChangesToGithub(part) {
+  const token = localStorage.getItem("peakGithubToken") || "";
+  const label = partObjectLabel(part);
+  if (!token) {
+    statusMessage = `Saved ${label} locally. Add a GitHub token in Settings > Setup to push to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+    renderApp();
+    return;
+  }
+
+  try {
+    const files = productDataSnapshotFilesForPart(part);
+    const message = `Update draft ${label}`;
+    await commitGithubJsonFiles(files, message, token);
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    statusMessage = `Saved ${label} and pushed product data to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  } catch (error) {
+    hasRepoChanges = true;
+    localStorage.setItem("peakHasLocalChanges", "true");
+    statusMessage = `Saved ${label} locally, but GitHub push failed: ${error.message}`;
+  }
+  renderApp();
+}
+
+function productDataSnapshotFilesForPart(part) {
+  const revisions = parts.filter((candidate) => candidate.part_number === part.part_number);
+  return [
+    {
+      path: `parts/${part.part_number}/${part.part_number}.json`,
+      value: productPartProperties(part.part_number, revisions)
+    },
+    {
+      path: `parts/${part.part_number}/${part.part_number}^${part.revision || "A"}.json`,
+      value: productRevisionProperties(part)
+    },
+    {
+      path: "manifest.json",
+      value: productDataSnapshotFiles().find((file) => file.path === "manifest.json")?.value
+    }
+  ].filter((file) => file.value);
+}
+
+async function commitGithubJsonFiles(files, message, token) {
+  const ref = await githubJson(`${productDataGithubRepoApi}/git/ref/heads/${encodeURIComponent(productDataGithubBranch)}`, token);
+  const baseCommit = await githubJson(ref.object.url, token);
+  const tree = await githubJson(`${productDataGithubRepoApi}/git/trees`, token, {
+    method: "POST",
+    body: {
+      base_tree: baseCommit.tree.sha,
+      tree: files.map((file) => ({
+        path: normalizeProductPath(file.path),
+        mode: "100644",
+        type: "blob",
+        content: `${JSON.stringify(file.value, null, 2)}\n`
+      }))
+    }
+  });
+  const commit = await githubJson(`${productDataGithubRepoApi}/git/commits`, token, {
+    method: "POST",
+    body: {
+      message,
+      tree: tree.sha,
+      parents: [baseCommit.sha]
+    }
+  });
+  await githubJson(`${productDataGithubRepoApi}/git/refs/heads/${encodeURIComponent(productDataGithubBranch)}`, token, {
+    method: "PATCH",
+    body: {
+      sha: commit.sha
+    }
+  });
+}
+
+async function githubJson(url, token, options = {}) {
+  const response = await fetch(url, {
+    method: options.method || "GET",
+    headers: githubHeaders(token),
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  if (!response.ok) {
+    throw new Error(await githubErrorMessage(response, "GitHub request failed"));
+  }
+  return response.json();
+}
+
+function githubHeaders(token) {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
+
+async function githubErrorMessage(response, fallback) {
+  try {
+    const payload = await response.json();
+    return payload.message ? `${fallback}: ${payload.message}` : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function productProjectsPayload() {
@@ -3709,7 +5133,8 @@ function productProjectsPayload() {
       key: projectKey(name),
       owner: projectOwner(name),
       approvers: projectApprovers(name),
-      description: projectDescription(name)
+      description: projectDescription(name),
+      drive_url: projectDriveUrl(name)
     }))
   };
 }
@@ -3731,6 +5156,7 @@ function productPartProperties(partNumber, revisions) {
     file_links: representative.file_links || [],
     tags: representative.tags || [],
     manufacturers: representative.manufacturers || [],
+    workflow: representative.part_properties?.workflow || representative.workflow || null,
     revisions: revisions.map((part) => `${partNumber}^${part.revision || "A"}.json`).sort()
   };
   return removeUndefinedFields(properties);
@@ -3754,6 +5180,7 @@ function productRevisionProperties(part) {
     approvers: part.approvers || [],
     bom: part.bom || [],
     attachments: part.attachments || part.documents || [],
+    workflow: part.revision_properties?.workflow || part.workflow || null,
     change_summary: part.change_summary || ""
   };
   return removeUndefinedFields(properties);

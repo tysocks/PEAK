@@ -13,9 +13,10 @@ a local folder selected in the app.
 
 PEAK is usable as a local registry prototype. It supports local editing against
 the selected product data folder, which should be the local Git checkout pushed
-to the production remote. GitHub sync is represented in the UI, but the actual pull, branch,
-commit, push, merge request creation, and approver assignment workflow still
-requires a future local bridge or backend service.
+to the production remote. Draft part edits can push directly to the
+`Launch-Canada/Product-Data` GitHub repository when a contents-write GitHub
+token is saved in Settings. Pull, branch, merge request creation, and approver
+assignment workflows still require a future local bridge or backend service.
 
 ## Repository Layout
 
@@ -182,10 +183,10 @@ Before a draft is created, the intended workflow is:
 - Validate project, part number, and part name.
 - Push the draft object directly to the remote.
 
-Draft creation does not require a merge request. The browser app records this
-workflow in the UI, but actual Git pull/push operations still require a local
-Git bridge or backend because browser JavaScript cannot safely run Git commands
-directly.
+Draft creation does not require a merge request. Draft edit saves write the
+selected product data folder and can push the affected JSON files directly to
+`Launch-Canada/Product-Data` when a GitHub token with contents write access is
+configured in Settings.
 
 Part numbers use the project code format:
 
@@ -423,8 +424,8 @@ Older fixture data using `in_review` is still tolerated and displayed as
 PEAK is intended to work without internet access for ordinary registry viewing
 and local editing.
 
-Internet access is only required for future GitHub synchronization and any
-future authenticated integrations such as Google Drive or Onshape APIs.
+Internet access is only required for draft edit pushes to GitHub and any future
+authenticated integrations such as Google Drive or Onshape APIs.
 
 ## Updating PEAK
 
@@ -434,7 +435,8 @@ After the GitHub remote is configured, update the app with:
 git pull origin main
 ```
 
-If a future sync bridge is added, PEAK should expose this through the Sync view.
+Merge-request workflows still need a local bridge or backend to create and
+assign GitHub review requests.
 
 ## Development Notes
 
