@@ -28,16 +28,20 @@ app/
   config.js       Local app configuration stub
 runner/
   server.mjs      Local server and Git runner for pushes and workflow PRs
+electron/
+  main.mjs        Initial Electron shell that starts the runner and opens PEAK
 package.json      Local runner scripts
+peak.config.example.json
+                  Example local runner product-data path config
 dev.md            Development notes and product direction
 README.md         This guide
 ```
 
 Part data is intentionally not stored in this app repository. Local PR6 part
-data lives in a separate repository:
+data lives in a separate Product-Data repository checkout.
 
 ```text
-C:\Users\tyler\Documents\PROJECTS\PR6 - PLM
+https://github.com/Launch-Canada/Product-Data
 ```
 
 That data repository uses one folder per part. Each folder contains one fixed
@@ -73,21 +77,29 @@ http://127.0.0.1:8765/
 
 On Windows, `Start PEAK.bat` does the same thing.
 
-By default, the runner uses:
+The runner no longer defaults to a workstation-specific product-data path. It
+uses the first available configuration source:
 
-```text
-C:\Users\tyler\Documents\PROJECTS\PR6 - PLM
+1. `PEAK_PRODUCT_DATA_DIR` environment variable.
+2. Local `peak.config.json` copied from `peak.config.example.json`.
+3. A portable `Product-Data` folder beside or inside the PEAK checkout.
+
+`peak.config.json` is ignored by Git so each workstation can point PEAK at its
+own local Product-Data checkout.
+
+To try the desktop shell during development, install dependencies and run:
+
+```powershell
+npm install
+npm run electron
 ```
 
-To point the runner at another product-data checkout, set
-`PEAK_PRODUCT_DATA_DIR` before starting PEAK.
+The Electron shell starts the same local runner, opens PEAK in a desktop
+window, and uses a native folder picker to configure the Product-Data checkout.
 
 Open Settings, choose the Setup tab, and select the local product data folder.
-For PR6 production data, select:
-
-```text
-C:\Users\tyler\Documents\PROJECTS\PR6 - PLM
-```
+For production data, select the local checkout of
+`Launch-Canada/Product-Data`.
 
 PEAK reads `manifest.json` and the referenced `parts/` files directly from that
 folder. Project metadata is read from `projects.json`. Product changes are
@@ -468,14 +480,14 @@ PEAK shows the same action inline beside the workflow error.
 
 PEAK is now shaped to become a locally installed app:
 
-1. Current: dependency-free Node runner serves `app/` and exposes Git endpoints.
-2. Next: add runner endpoints for folder selection, pull, PR status polling, and
-   approver assignment.
-3. Then: wrap the runner and UI in Electron, following the ORCHE Runner pattern
-   with an Electron main process that starts the local server and opens PEAK.
-4. Packaging: add `electron`, `electron-builder`, and Windows NSIS packaging so
-   PEAK installs with a desktop shortcut and starts without a terminal.
-5. Later: add auto-update from `Launch-Canada/PEAK` once the installer flow is
+1. Current: Node runner serves `app/` and exposes Git/config endpoints.
+2. Current: initial Electron main process starts the runner and opens PEAK.
+3. Next: add native folder selection in Electron and wire it to the runner
+   product-data config endpoint.
+4. Next: validate `electron-builder` Windows NSIS packaging and installer
+   shortcuts.
+5. Later: add PR status polling, approver assignment, and auto-update from
+   `Launch-Canada/PEAK` once the installer flow is
    stable.
 
 ## Development Notes

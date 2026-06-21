@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -10,10 +11,9 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const appRoot = path.join(repoRoot, "app");
+const configPath = path.join(repoRoot, "peak.config.json");
 const port = Number(process.env.PEAK_PORT || process.env.PORT || 8765);
-const productDataDir = path.resolve(
-  process.env.PEAK_PRODUCT_DATA_DIR || "C:/Users/tyler/Documents/PROJECTS/PR6 - PLM"
-);
+let productDataDir = resolveProductDataDir();
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -28,6 +28,15 @@ createServer(async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
     if (url.pathname === "/api/product-data") {
       await sendJson(response, await readProductData());
+      return;
+    }
+    if (url.pathname === "/api/config") {
+      await sendJson(response, await runnerConfig());
+      return;
+    }
+    if (url.pathname === "/api/config/product-data-folder" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      await sendJson(response, await saveProductDataFolder(body?.productDataDir || body?.path));
       return;
     }
     if (url.pathname === "/api/git/status") {
@@ -66,8 +75,36 @@ createServer(async (request, response) => {
   }
 }).listen(port, () => {
   console.log(`PEAK runner serving http://127.0.0.1:${port}`);
-  console.log(`Product data: ${productDataDir}`);
+  console.log(productDataDir ? `Product data: ${productDataDir}` : "Product data: not configured");
 });
+
+function resolveProductDataDir() {
+  const configured = process.env.PEAK_PRODUCT_DATA_DIR || readConfiguredProductDataDir();
+  if (configured) {
+    return path.resolve(configured);
+  }
+  return portableProductDataCandidates().find((candidate) => existsSync(path.join(candidate, "manifest.json"))) || "";
+}
+
+function readConfiguredProductDataDir() {
+  try {
+    if (!existsSync(configPath)) {
+      return "";
+    }
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    return config.productDataDir || "";
+  } catch {
+    return "";
+  }
+}
+
+function portableProductDataCandidates() {
+  return [
+    path.join(repoRoot, "Product-Data"),
+    path.resolve(repoRoot, "..", "Product-Data"),
+    path.join(os.homedir(), "Documents", "Product-Data")
+  ];
+}
 
 async function pushDraft(body) {
   await assertProductDataRepo();
@@ -170,7 +207,46 @@ async function requireCleanWorkingTree(action = "continue") {
   }
 }
 
+async function runnerConfig() {
+  return {
+    ok: true,
+    productDataDir,
+    configured: Boolean(productDataDir),
+    candidates: portableProductDataCandidates(),
+    configPath,
+    message: productDataDir
+      ? `Product data folder configured: ${productDataDir}`
+      : "Product data folder is not configured. Set PEAK_PRODUCT_DATA_DIR or choose a Product-Data folder in the local app."
+  };
+}
+
+async function saveProductDataFolder(value) {
+  const requested = String(value || "").trim();
+  if (!requested) {
+    throw new Error("Product data folder path is required.");
+  }
+  const nextDir = path.resolve(requested);
+  if (!existsSync(path.join(nextDir, "manifest.json"))) {
+    throw new Error(`Selected folder is not a PEAK product data repository: ${nextDir}`);
+  }
+  const config = { productDataDir: nextDir };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  productDataDir = nextDir;
+  return {
+    ok: true,
+    productDataDir,
+    message: `Product data folder configured: ${productDataDir}`
+  };
+}
+
+function assertProductDataConfigured() {
+  if (!productDataDir) {
+    throw new Error("Product data folder is not configured. Set PEAK_PRODUCT_DATA_DIR or choose a Product-Data folder in the local app.");
+  }
+}
+
 async function readProductData() {
+  assertProductDataConfigured();
   await access(productDataDir);
   const manifest = await readJsonFile("manifest.json");
   const parts = (await Promise.all((manifest.parts || []).map((entry) => readPartEntry(entry)))).flat();
@@ -291,6 +367,15 @@ function asArray(value) {
 }
 
 async function gitStatus() {
+  if (!productDataDir) {
+    return {
+      configured: false,
+      dirty: false,
+      branch: null,
+      remote: null,
+      message: "Product data folder is not configured."
+    };
+  }
   if (!existsSync(path.join(productDataDir, ".git"))) {
     return {
       configured: false,
@@ -316,6 +401,7 @@ async function gitStatus() {
 }
 
 async function assertProductDataRepo() {
+  assertProductDataConfigured();
   await access(productDataDir);
   if (!existsSync(path.join(productDataDir, ".git"))) {
     throw new Error(`Product data folder is not a Git repository: ${productDataDir}`);
@@ -399,7 +485,7 @@ function startVisibleGitHubAuth() {
   if (process.platform === "win32") {
     const command = `title PEAK GitHub Login && gh ${args.join(" ")} && echo. && echo GitHub is connected. You can close this window. && pause`;
     const child = spawn("cmd.exe", ["/c", "start", "PEAK GitHub Login", "cmd.exe", "/k", command], {
-      cwd: productDataDir,
+      cwd: productDataDir || repoRoot,
       detached: true,
       windowsHide: false,
       stdio: "ignore",
@@ -410,7 +496,7 @@ function startVisibleGitHubAuth() {
   }
 
   const child = spawn("gh", args, {
-    cwd: productDataDir,
+    cwd: productDataDir || repoRoot,
     detached: true,
     stdio: "ignore",
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
@@ -420,7 +506,7 @@ function startVisibleGitHubAuth() {
 
 async function runGh(args) {
   const { stdout, stderr } = await execFileAsync("gh", args, {
-    cwd: productDataDir,
+    cwd: productDataDir || repoRoot,
     windowsHide: true,
     maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }

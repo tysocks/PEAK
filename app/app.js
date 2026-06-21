@@ -61,6 +61,7 @@ const peakRunnerProductDataUrl = "/api/product-data";
 const peakRunnerPushUrl = "/api/git/push-draft";
 const peakRunnerWorkflowUrl = "/api/git/workflow-transition";
 const peakRunnerPullMainUrl = "/api/git/pull-main";
+const peakRunnerConfigProductDataFolderUrl = "/api/config/product-data-folder";
 const peakRunnerGitHubAuthStatusUrl = "/api/github/auth-status";
 const peakRunnerGitHubAuthLoginUrl = "/api/github/auth-login";
 
@@ -489,6 +490,10 @@ async function loadStoredProductDataFolder() {
 }
 
 async function selectProductDataFolder() {
+  if (window.peakDesktop?.selectProductDataFolder) {
+    await selectProductDataFolderFromDesktop();
+    return;
+  }
   if (!("showDirectoryPicker" in window)) {
     statusMessage = "This browser does not support selecting local folders. Open PEAK in a Chromium browser.";
     renderApp();
@@ -511,6 +516,41 @@ async function selectProductDataFolder() {
       statusMessage = `Could not select product data folder: ${error.message}`;
       renderApp();
     }
+  }
+}
+
+async function selectProductDataFolderFromDesktop() {
+  try {
+    const selection = await window.peakDesktop.selectProductDataFolder();
+    if (!selection?.path) {
+      return;
+    }
+    const response = await fetch(peakRunnerConfigProductDataFolderUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productDataDir: selection.path })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "Could not configure product data folder");
+    }
+    productDataDirectoryHandle = null;
+    productDataFolderName = selection.name || payload.productDataDir || "Product-Data";
+    localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+    const runnerPayload = await loadPartsFromRunner();
+    parts = sortParts(runnerPayload.parts);
+    customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    selectedPartNumber = partKey(parts[0]) || null;
+    openedPartNumber = null;
+    selectedBomPartNumber = selectedPartNumber;
+    renderProjectOptions();
+    statusMessage = payload.message || `Using product data folder ${productDataFolderName}`;
+    renderApp();
+  } catch (error) {
+    statusMessage = `Could not select product data folder: ${runnerErrorMessage(error)}`;
+    renderApp();
   }
 }
 
