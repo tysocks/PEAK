@@ -24,6 +24,7 @@ let selectedBomPartNumber = null;
 let selectedProjectName = "";
 let activeNavMode = "home";
 let activePartEditMode = false;
+let activeAttachmentEditMode = false;
 let activeProjectEditMode = false;
 let activeCreateMode = "hub";
 let activeResultView = "grid";
@@ -31,12 +32,19 @@ let activePropertyTab = "overview";
 let activeAttachmentDraftCount = 0;
 let activeTableSort = { column: "part_number", direction: "asc" };
 let tableColumnFilters = {};
+let activeHistorySort = { column: "performed_at", direction: "desc" };
+let historyColumnFilters = {};
 let collapsedBomNodes = new Set();
+let activeBomAddParent = "";
 let activeSettingsTab = "setup";
 let activeColorScheme = localStorage.getItem("peakColorScheme") || "dark";
 let activeAccentColor = localStorage.getItem("peakAccentColor") || "teal";
 let activeAccentCustomHex = localStorage.getItem("peakAccentCustomHex") || "#35d1a8";
 let statusMessage = "";
+let workflowFeedback = {};
+let githubAuthStatus = null;
+let githubAuthChecking = false;
+let githubAuthPollingTimer = null;
 let hasRepoChanges = loadHasLocalChanges();
 let connections = loadConnections();
 let customProjects = loadProjects();
@@ -48,8 +56,13 @@ const productDataStoreName = "handles";
 const productDataGithubOwner = "Launch-Canada";
 const productDataGithubRepo = "Product-Data";
 const productDataGithubBranch = "main";
-const productDataGithubRepoApi = `https://api.github.com/repos/${productDataGithubOwner}/${productDataGithubRepo}`;
 const productDataGithubUrl = `https://github.com/${productDataGithubOwner}/${productDataGithubRepo}`;
+const peakRunnerProductDataUrl = "/api/product-data";
+const peakRunnerPushUrl = "/api/git/push-draft";
+const peakRunnerWorkflowUrl = "/api/git/workflow-transition";
+const peakRunnerPullMainUrl = "/api/git/pull-main";
+const peakRunnerGitHubAuthStatusUrl = "/api/github/auth-status";
+const peakRunnerGitHubAuthLoginUrl = "/api/github/auth-login";
 
 const accentPresets = [
   { id: "teal", name: "Teal", color: "#35d1a8" },
@@ -64,13 +77,14 @@ const accentPresets = [
 
 const tabularColumns = [
   { key: "part_number", label: "Part No", value: (part) => part.part_number },
+  { key: "legacy_part_number", label: "Legacy Part No", value: (part) => legacyPartNumberValue(part) },
   { key: "revision", label: "Rev", value: (part) => part.revision || "A" },
   { key: "name", label: "Name", value: (part) => part.name },
   { key: "project", label: "Project", value: (part) => part.project },
   { key: "state", label: "State", value: (part) => releaseStatusLabel(part) },
   { key: "owner", label: "Owner", value: (part) => part.updated_by || part.owner || part.created_by },
   { key: "maturity", label: "Maturity", value: (part) => maturityStageValue(part) },
-  { key: "traceability", label: "Traceability", value: (part) => part.traceability },
+  { key: "traceability", label: "Traceability", value: (part) => traceabilityValue(part) },
   { key: "created_by", label: "Created By", value: (part) => part.created_by || part.owner },
   { key: "created_at", label: "Created Date", value: (part) => part.created_at },
   { key: "updated_by", label: "Last Edited By", value: (part) => part.updated_by || part.owner },
@@ -82,6 +96,20 @@ const tabularColumns = [
   { key: "wi", label: "WI", value: (part) => documentUrl(part, "work") },
   { key: "attachments", label: "Attachments", value: (part) => attachmentsForPart(part).length },
   { key: "bom", label: "BOM Items", value: (part) => asArray(part.bom).length }
+];
+
+const historyColumns = [
+  { key: "performed_at", label: "Performed", value: (row) => row.performed_at },
+  { key: "action", label: "Action", value: (row) => activityActionLabel(row.action) },
+  { key: "actor", label: "User", value: (row) => row.actor },
+  { key: "part_number", label: "Part No", value: (row) => row.part_number },
+  { key: "revision", label: "Rev", value: (row) => row.revision },
+  { key: "object_id", label: "Part ID", value: (row) => row.object_id },
+  { key: "name", label: "Name", value: (row) => row.name },
+  { key: "project", label: "Project", value: (row) => row.project },
+  { key: "state", label: "Revision Status", value: (row) => row.state },
+  { key: "maturity", label: "Maturity", value: (row) => row.maturity },
+  { key: "detail", label: "Detail", value: (row) => row.detail }
 ];
 
 const revisionWorkflowStates = ["draft", "release_candidate", "released", "obsolete"];
@@ -155,16 +183,61 @@ function findPartByKey(identifier) {
   if (!key) {
     return undefined;
   }
+  const [rawPartNumber, rawRevision] = key.split("^");
+  const canonicalKey = canonicalPartNumber(rawPartNumber || key);
   return (
     parts.find((part) => partKey(part) === key) ||
     parts.find((part) => part.part_number === key) ||
-    parts.find((part) => `${part.part_number}^${part.revision || "V1"}` === key)
+    parts.find((part) => `${part.part_number}^${part.revision || "V1"}` === key) ||
+    parts.find((part) => canonicalPartNumber(part.part_number) === canonicalKey && (!rawRevision || String(part.revision || "V1") === rawRevision))
   );
 }
 
 function latestRevisionForPart(partNumber) {
   const revisions = parts.filter((part) => part.part_number === partNumber);
-  return revisions[revisions.length - 1];
+  return sortRevisions(revisions).at(-1);
+}
+
+function sortRevisions(revisions) {
+  return [...revisions].sort((a, b) => compareRevisionLabels(a?.revision, b?.revision));
+}
+
+function sortParts(records) {
+  return [...records].sort((a, b) => {
+    const partCompare = canonicalPartNumber(a?.part_number || "").localeCompare(canonicalPartNumber(b?.part_number || ""));
+    return partCompare || compareRevisionLabels(a?.revision, b?.revision);
+  });
+}
+
+function canonicalPartNumber(value) {
+  const raw = String(value || "").trim().toUpperCase();
+  const match = raw.match(/^([A-Z0-9]+)-0*(\d+)$/);
+  if (!match) {
+    return raw;
+  }
+  return `${match[1]}-${String(Number(match[2]))}`;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compareRevisionLabels(a, b) {
+  const left = revisionSortParts(a);
+  const right = revisionSortParts(b);
+  const majorCompare = left.major.localeCompare(right.major);
+  if (majorCompare !== 0) {
+    return majorCompare;
+  }
+  return left.minor - right.minor;
+}
+
+function revisionSortParts(revision) {
+  const match = String(revision || "A").trim().toUpperCase().match(/^([A-Z]+)(\d+)?$/);
+  if (!match) {
+    return { major: String(revision || ""), minor: 0 };
+  }
+  return { major: match[1], minor: match[2] ? Number(match[2]) : 0 };
 }
 
 function asArray(value) {
@@ -177,8 +250,22 @@ function asArray(value) {
 async function loadParts() {
   productDataDirectoryHandle = await loadStoredProductDataFolder();
   let loadedParts = [];
+  let loadedFromRunner = false;
 
-  if (productDataDirectoryHandle) {
+  try {
+    const runnerPayload = await loadPartsFromRunner();
+    loadedParts = runnerPayload.parts;
+    customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
+    productDataFolderName = runnerPayload.folderName || productDataFolderName || "Product data runner";
+    localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    loadedFromRunner = true;
+  } catch (error) {
+    console.info("PEAK runner product data is not available; falling back to browser folder access.", error);
+  }
+
+  if (!loadedFromRunner && productDataDirectoryHandle) {
     try {
       loadedParts = await loadPartsFromProductDataFolder(productDataDirectoryHandle);
       customProjects = await loadProjectsFromProductDataFolder(productDataDirectoryHandle, loadedParts);
@@ -188,7 +275,7 @@ async function loadParts() {
       console.warn("Could not load PEAK product data from the selected local folder.", error);
       statusMessage = error.message;
     }
-  } else {
+  } else if (!loadedFromRunner) {
     statusMessage = "Select a local product data folder in Settings > Setup.";
   }
 
@@ -201,10 +288,52 @@ async function loadParts() {
     throw new Error("PEAK data records must include part_number and name");
   }
 
-  parts = loadedParts.sort((a, b) => partKey(a).localeCompare(partKey(b)));
+  parts = sortParts(loadedParts);
   selectedPartNumber = partKey(parts[0]) || null;
   renderProjectOptions();
   initRoute();
+}
+
+async function loadPartsFromRunner() {
+  const response = await fetch(peakRunnerProductDataUrl, { cache: "no-store" });
+  const contentType = response.headers.get("content-type") || "";
+  if (!response.ok || !contentType.includes("application/json")) {
+    throw new Error("PEAK runner product data endpoint is not available");
+  }
+  const payload = await response.json();
+  if (payload.ok === false || !Array.isArray(payload.parts)) {
+    throw new Error(payload.message || "PEAK runner did not return product parts");
+  }
+  return payload;
+}
+
+async function pullMainFromRunner() {
+  const previousSelected = selectedPartNumber;
+  const previousOpened = openedPartNumber;
+  const previousBom = selectedBomPartNumber;
+  statusMessage = `Pulling latest ${productDataGithubBranch} from ${productDataGithubOwner}/${productDataGithubRepo}...`;
+  renderApp();
+  try {
+    const response = await fetch(peakRunnerPullMainUrl, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "Pull from main failed");
+    }
+    const runnerPayload = await loadPartsFromRunner();
+    parts = sortParts(runnerPayload.parts);
+    customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
+    productDataFolderName = runnerPayload.folderName || productDataFolderName;
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    selectedPartNumber = findPartByKey(previousSelected) ? previousSelected : partKey(parts[0]) || null;
+    openedPartNumber = findPartByKey(previousOpened) ? previousOpened : null;
+    selectedBomPartNumber = findPartByKey(previousBom) ? previousBom : openedPartNumber || selectedPartNumber;
+    renderProjectOptions();
+    statusMessage = `Pulled latest main. ${payload.message || payload.lastCommit || ""}`.trim();
+  } catch (error) {
+    statusMessage = `Pull main failed: ${runnerErrorMessage(error)}`;
+  }
+  renderApp();
 }
 
 async function loadPartsFromProductDataFolder(directoryHandle) {
@@ -235,7 +364,8 @@ function normalizeProjectsPayload(payload) {
     owner: String(project.owner || "").trim(),
     approvers: asArray(project.approvers).map((approver) => String(approver).trim()).filter(Boolean),
     description: String(project.description || "").trim(),
-    drive_url: String(project.drive_url || project.google_drive_url || project.driveUrl || "").trim()
+    drive_url: String(project.drive_url || project.google_drive_url || project.driveUrl || "").trim(),
+    allow_custom_part_numbers: project.allow_custom_part_numbers === true || project.allowCustomPartNumbers === true
   })).filter((project) => project.name);
 }
 
@@ -251,7 +381,8 @@ function inferProjectsFromParts(sourceParts) {
       owner: part.owner || "engineering@example.com",
       approvers: [],
       description: `${part.project} project records`,
-      drive_url: ""
+      drive_url: "",
+      allow_custom_part_numbers: false
     });
   });
   return [...inferred.values()];
@@ -428,7 +559,7 @@ async function saveProductDataHandle(handle) {
 }
 
 async function reloadProductDataFromFolder() {
-  parts = (await loadPartsFromProductDataFolder(productDataDirectoryHandle)).sort((a, b) => partKey(a).localeCompare(partKey(b)));
+  parts = sortParts(await loadPartsFromProductDataFolder(productDataDirectoryHandle));
   customProjects = await loadProjectsFromProductDataFolder(productDataDirectoryHandle, parts);
   selectedPartNumber = partKey(parts[0]) || null;
   selectedBomPartNumber = selectedPartNumber;
@@ -461,16 +592,14 @@ function normalizeLegacyPartRecord(part) {
       part_number: part.part_number,
       name: part.name,
       description: part.description,
-      category: part.category,
       project: part.project,
-      traceability: part.traceability,
+      traceability: traceabilityValue(part) || "LOT",
       maturity: part.maturity || part.lifecycle_state,
       onshape: asArray(part.onshape),
       documents: asArray(part.documents),
       work_instructions: asArray(part.work_instructions),
       file_links: asArray(part.file_links),
       tags: asArray(part.tags),
-      manufacturers: asArray(part.manufacturers)
     },
     revision
   );
@@ -486,9 +615,9 @@ function normalizeRevisionRecord(partProperties, revisionProperties) {
     revision,
     name: partProperties.name || revisionProperties.name,
     description: partProperties.description || revisionProperties.description,
-    category: partProperties.category || revisionProperties.category,
+    legacy_part_number: partProperties.legacy_part_number || partProperties.legacyPartNumber || revisionProperties.legacy_part_number || revisionProperties.legacyPartNumber || "",
     project: partProperties.project || revisionProperties.project,
-    traceability: partProperties.traceability || revisionProperties.traceability,
+    traceability: normalizeTraceability(partProperties.traceability || revisionProperties.traceability),
     maturity: partProperties.maturity || revisionProperties.maturity || revisionProperties.lifecycle_state,
     onshape: asArray(partProperties.onshape || revisionProperties.onshape),
     work_instructions: asArray(partProperties.work_instructions || revisionProperties.work_instructions),
@@ -496,7 +625,6 @@ function normalizeRevisionRecord(partProperties, revisionProperties) {
     documents: asArray(revisionProperties.attachments || revisionProperties.documents),
     attachments: asArray(revisionProperties.attachments || revisionProperties.documents),
     tags: asArray(partProperties.tags || revisionProperties.tags),
-    manufacturers: asArray(partProperties.manufacturers || revisionProperties.manufacturers),
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
@@ -569,8 +697,8 @@ function searchTitle() {
   if (activeNavMode === "projects") {
     return "Projects";
   }
-  if (activeNavMode === "sync") {
-    return "Sync";
+  if (activeNavMode === "history") {
+    return "History";
   }
   if (activeNavMode === "table") {
     return "Parts Table";
@@ -594,8 +722,8 @@ function renderMainRows(visibleParts) {
     renderProjectRows();
     return;
   }
-  if (activeNavMode === "sync") {
-    renderSyncRows();
+  if (activeNavMode === "history") {
+    renderHistoryRows(visibleParts);
     return;
   }
   if (activeNavMode === "table") {
@@ -618,7 +746,7 @@ function pageHeading() {
     home: "Search",
     create: "Create",
     projects: "Projects",
-    sync: "Sync",
+    history: "History",
     table: "Table",
     report: "Report",
     settings: "Settings"
@@ -631,7 +759,7 @@ function pageDescription() {
     home: "Search all parts across every project.",
     create: "Create draft parts with project-specific part numbers.",
     projects: "Browse project folders, owners, approvers, and part counts.",
-    sync: "Pull updates or prepare a branch and merge request for review.",
+    history: "Review activity across every part revision.",
     table: "Review every part revision and property in a sortable table.",
     report: "Select a report and review filtered registry results.",
     settings: "Configure local PEAK behavior for this workstation."
@@ -646,7 +774,7 @@ function pageNavigatorTitle() {
   const titles = {
     create: "Create",
     projects: "Projects",
-    sync: "Sync",
+    history: "History",
     table: "Table",
     report: "Reports",
     settings: "Settings"
@@ -670,8 +798,8 @@ function pageStatus(visibleParts) {
   if (activeNavMode === "table") {
     return `${tabularParts(visibleParts).length} of ${visibleParts.length} table rows`;
   }
-  if (activeNavMode === "sync") {
-    return hasRepoChanges ? "Browser edits pending" : "No browser edits pending";
+  if (activeNavMode === "history") {
+    return `${historyRows(visibleParts).length} history events`;
   }
   if (activeNavMode === "settings") {
     return "Local configuration";
@@ -688,8 +816,8 @@ function renderPageDetail() {
     renderProjectsDetail();
     return;
   }
-  if (activeNavMode === "sync") {
-    partDetail.innerHTML = `<section class="propertySection"><h3>Sync</h3><p class="description">Sync requires a local bridge because browser JavaScript cannot run Git commands directly. This page shows the required pull and merge request workflow.</p></section>`;
+  if (activeNavMode === "history") {
+    renderHistoryDetail();
     return;
   }
   if (activeNavMode === "table") {
@@ -723,7 +851,11 @@ function renderOpenedPartWorkspace() {
   workspaceHeading.textContent = rootPart.name;
   document.querySelector(".eyebrow").textContent = pageDescription();
   navigatorTitle.textContent = activePartEditMode ? "Edit BOM Structure" : "BOM Structure";
-  resultsTitle.textContent = activePartEditMode ? `${partObjectLabel(selectedPart)} Edit` : `${partObjectLabel(selectedPart)} Details`;
+  resultsTitle.textContent = activePartEditMode
+    ? `${partObjectLabel(selectedPart)} Edit`
+    : activeAttachmentEditMode
+      ? `${partObjectLabel(selectedPart)} Attachments`
+      : `${partObjectLabel(selectedPart)} Details`;
 
   renderBomTree();
   tableHead.innerHTML = "";
@@ -742,7 +874,7 @@ function matchesSearch(part, query) {
     part.name,
     part.description,
     part.project,
-    part.lifecycle_state,
+    revisionStatusValue(part),
     part.revision,
     part.owner,
     ...(part.tags ?? []),
@@ -764,7 +896,7 @@ function filteredParts() {
   return parts.filter(
     (part) =>
       matchesSearch(part, query) &&
-      (!state || lifecycleMatches(part.lifecycle_state, state)) &&
+      (!state || lifecycleMatches(revisionStatusValue(part), state)) &&
       (!project || part.project === project)
   );
 }
@@ -871,14 +1003,14 @@ function groupedPartResults(records) {
   return [...groups.entries()]
     .map(([partNumber, revisions]) => ({
       part_number: partNumber,
-      revisions: [...revisions].sort((a, b) => String(a.revision || "").localeCompare(String(b.revision || ""))),
+      revisions: sortRevisions(revisions),
       representative: representativeRevision(revisions)
     }))
     .sort((a, b) => a.part_number.localeCompare(b.part_number));
 }
 
 function representativeRevision(revisions) {
-  return [...revisions].sort((a, b) => partKey(b).localeCompare(partKey(a)))[0];
+  return sortRevisions(revisions).at(-1);
 }
 
 function latestReleasedRevision(revisions) {
@@ -886,7 +1018,7 @@ function latestReleasedRevision(revisions) {
     .filter((part) => releaseStatusLabel(part) === "Released")
     .sort((a, b) => {
       const dateCompare = String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
-      return dateCompare || String(b.revision || "").localeCompare(String(a.revision || ""));
+      return dateCompare || compareRevisionLabels(b.revision, a.revision);
     })[0];
 }
 
@@ -966,6 +1098,111 @@ function tabularColumnValue(part, column) {
   return column.value(part) ?? "";
 }
 
+function renderHistoryRows(visibleParts) {
+  const rows = historyRows(visibleParts);
+  tableHead.innerHTML = `
+    <tr class="tabularHeaderRow">
+      ${historyColumns.map(historyHeaderCell).join("")}
+    </tr>
+  `;
+
+  if (!rows.length) {
+    partsList.innerHTML = `<tr><td class="emptyCell" colspan="${historyColumns.length}">No matching history events</td></tr>`;
+    return;
+  }
+
+  partsList.innerHTML = rows.map((row) => `
+    <tr class="objectRow tabularRow${row.object_id === selectedPartNumber ? " active" : ""}" data-part-number="${escapeHtml(row.object_id)}" data-history-part="${escapeHtml(row.object_id)}" tabindex="0">
+      ${historyColumns.map((column) => historyBodyCell(row, column)).join("")}
+    </tr>
+  `).join("");
+}
+
+function historyHeaderCell(column) {
+  const isSorted = activeHistorySort.column === column.key;
+  const direction = isSorted ? activeHistorySort.direction : "";
+  return `
+    <th scope="col" class="tabularHeaderCell">
+      <button class="tableSortButton${isSorted ? " active" : ""}" type="button" data-history-sort="${escapeHtml(column.key)}" aria-label="Sort ${escapeHtml(column.label)} ${direction === "asc" ? "descending" : "ascending"}">
+        <span>${escapeHtml(column.label)}</span>
+        <span class="tableSortIndicator" aria-hidden="true">${
+          direction === "asc"
+            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>`
+            : direction === "desc"
+            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>`
+            : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l4-4 4 4"/><path d="M16 15l-4 4-4-4"/></svg>`
+        }</span>
+      </button>
+      <input class="tableFilterInput" value="${escapeHtml(historyColumnFilters[column.key] || "")}" data-history-filter="${escapeHtml(column.key)}" placeholder="" aria-label="Filter ${escapeHtml(column.label)}">
+    </th>
+  `;
+}
+
+function historyBodyCell(row, column) {
+  const value = historyColumnValue(row, column);
+  const displayValue = column.key === "performed_at" ? formatActivityTimestamp(value) : value;
+  return `<td title="${escapeHtml(displayValue || "")}">${escapeHtml(displayValue || "")}</td>`;
+}
+
+function historyRows(sourceParts) {
+  const rows = sourceParts.flatMap((part) =>
+    activityHistoryForPart(part).map((activity) => ({
+      ...activity,
+      part_number: part.part_number,
+      revision: part.revision || "A",
+      object_id: partKey(part),
+      name: part.name || "",
+      project: part.project || "",
+      state: releaseStatusLabel(part),
+      maturity: maturityStageLabel(part)
+    }))
+  );
+  const filtered = rows.filter((row) =>
+    historyColumns.every((column) => {
+      const filter = String(historyColumnFilters[column.key] || "").trim().toLowerCase();
+      if (!filter) {
+        return true;
+      }
+      const value = column.key === "performed_at" ? formatActivityTimestamp(historyColumnValue(row, column)) : historyColumnValue(row, column);
+      return String(value || "").toLowerCase().includes(filter);
+    })
+  );
+  const sortColumn = historyColumns.find((column) => column.key === activeHistorySort.column) || historyColumns[0];
+  const direction = activeHistorySort.direction === "desc" ? -1 : 1;
+  return [...filtered].sort((a, b) => {
+    const aValue = historyColumnValue(a, sortColumn);
+    const bValue = historyColumnValue(b, sortColumn);
+    if (sortColumn.key === "performed_at") {
+      return String(aValue || "").localeCompare(String(bValue || "")) * direction;
+    }
+    const numeric = Number(aValue) - Number(bValue);
+    if (aValue !== "" && bValue !== "" && Number.isFinite(numeric)) {
+      return numeric * direction;
+    }
+    return String(aValue || "").localeCompare(String(bValue || ""), undefined, { numeric: true, sensitivity: "base" }) * direction;
+  });
+}
+
+function historyColumnValue(row, column) {
+  return column.value(row) ?? "";
+}
+
+function renderHistoryDetail() {
+  partDetail.innerHTML = `
+    <div class="tabularDetailLayout">
+      ${historyActionRail()}
+    </div>
+  `;
+}
+
+function historyActionRail() {
+  return `
+    <aside class="partActionRail" aria-label="History actions">
+      ${partActionButton("Pull Remote", "pull-main")}
+    </aside>
+  `;
+}
+
 function renderTabularDetail() {
   partDetail.innerHTML = `
     <div class="tabularDetailLayout">
@@ -978,15 +1215,17 @@ function tabularActionRail() {
   return `
     <aside class="partActionRail" aria-label="Table actions">
       ${partActionButton("Import Tabular Data", "import-tabular")}
+      ${partActionButton("Push Changes", "push-tabular")}
       ${partActionButton("Export Tabular CSV", "export-tabular-csv")}
       ${partActionButton("Export PEAK JSON", "export-tabular-json")}
+      ${partActionButton("Pull Main", "pull-main")}
     </aside>
   `;
 }
 
 function renderReportRows(visibleParts) {
   const projectCounts = countBy(visibleParts, "project");
-  const stateCounts = countBy(visibleParts, "lifecycle_state");
+  const stateCounts = countBy(visibleParts.map((part) => ({ state: revisionStatusValue(part) })), "state");
   const linkCount = visibleParts.reduce(
     (total, part) => total + (part.documents ?? []).length + (part.onshape ?? []).length,
     0
@@ -1059,9 +1298,9 @@ function renderCreateHubRows() {
 
 function renderCreateItemRows({ fromSource }) {
   tableHead.innerHTML = "";
-  const projectOptions = projects()
+  const projectOptions = ['<option value="">No project</option>', ...projects()
     .map((project) => `<option value="${escapeHtml(project)}">${escapeHtml(project)}</option>`)
-    .join("");
+  ].join("");
   const selectedProject = projectFilter.value || projects()[0] || "Unassigned Project";
   const generatedPartNumber = nextProjectPartNumber(selectedProject);
   const sourceField = fromSource
@@ -1085,7 +1324,7 @@ function renderCreateItemRows({ fromSource }) {
           <div class="createFormField">
             <div class="createFormMeta">
               <label class="createFormLabel" for="newPartProject">Project</label>
-              <span class="createFormHint">Project must exist in the registry</span>
+              <span class="createFormHint">Optional for tooling or non-BOM records</span>
             </div>
             <select class="tableInput createFormInput" id="newPartProject">${projectOptions}</select>
           </div>
@@ -1201,6 +1440,13 @@ function renderCreateProjectRows() {
             </div>
             <input class="tableInput createFormInput" id="newProjectDescription" value="">
           </div>
+          <label class="createCheckboxField">
+            <input type="checkbox" id="newProjectCustomNumbers">
+            <span>Allow custom part numbers</span>
+          </label>
+          <div class="createFormMeta createFormFullHint">
+            <span class="createFormHint">Custom numbers must still be unique and start with the project code.</span>
+          </div>
           <div class="createFormActions">
             <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub" title="Cancel" aria-label="Cancel"></button>
             <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-project title="Create Project" aria-label="Create Project"></button>
@@ -1274,6 +1520,7 @@ function renderProjectDetailBody(project) {
         ${editing ? propertyProjectEditInline("Owner", "owner", projectOwner(project)) : property("Owner", projectOwner(project))}
         ${editing ? propertyProjectEditInline("Approvers", "approvers", projectApprovers(project).join(", ")) : property("Approvers", projectApprovers(project).join(", ") || "Not set")}
         ${editing ? propertyProjectEditInline("Google Drive Link", "drive_url", projectDriveUrl(project)) : propertyLink("Google Drive Link", projectDriveUrl(project))}
+        ${editing ? propertyProjectToggleInline("Allow Custom Part Numbers", "allow_custom_part_numbers", projectAllowsCustomPartNumbers(project)) : property("Allow Custom Part Numbers", projectAllowsCustomPartNumbers(project) ? "Yes" : "No")}
         ${editing ? propertyProjectEditInline("Description", "description", projectDescription(project), { textarea: true }) : property("Description", projectDescription(project))}
       </dl>
       ${editing ? `
@@ -1304,12 +1551,25 @@ function propertyProjectEditInline(label, field, value, { textarea = false } = {
   `;
 }
 
+function propertyProjectToggleInline(label, field, checked) {
+  return `
+    <dt>${escapeHtml(label)}</dt>
+    <dd>
+      <label class="createCheckboxField inlineCheckboxField">
+        <input type="checkbox" data-selected-project-field="${escapeHtml(field)}"${checked ? " checked" : ""}>
+        <span>Allowed</span>
+      </label>
+    </dd>
+  `;
+}
+
 function projectActionRail(project) {
   return `
     <aside class="partActionRail" aria-label="Project actions">
       ${partActionButton("Open Project Folder", "open-project-folder")}
       ${partActionButton("Open Google Drive", "open-project-drive", { disabled: !projectDriveUrl(project) })}
       ${partActionButton("Edit Project", "edit-project", { active: activeProjectEditMode })}
+      ${partActionButton("Pull Main", "pull-main")}
     </aside>
   `;
 }
@@ -1329,7 +1589,7 @@ function renderPartEditorRows(part) {
     ${partEditorRow("Name", "name", part.name, "Stable part name")}
     ${partEditorRow("Description", "description", part.description || "", "Stable part description")}
     ${partEditorSelectRow("Project", "project", part.project, projects(), "Project folder assignment")}
-    ${partEditorRow("Traceability", "traceability", part.traceability || "", "Stable traceability value")}
+    ${partEditorSelectRow("Traceability", "traceability", traceabilityValue(part) || "LOT", traceabilityOptions(), "Stable traceability value")}
     ${partReadonlyRow("Part Maturity", maturityStageLabel(part), "Workflow-controlled part maturity")}
     ${partEditorRow("Revision", "revision", part.revision || "A", "Revision object identifier")}
     ${partReadonlyRow("Release Status", releaseStatusLabel(part), "Workflow-controlled revision release status")}
@@ -1359,7 +1619,7 @@ function renderPartReadonlyRows(rootPart, selectedPart) {
     ${partReadonlyRow("Part Number", selectedPart.part_number, "Unique object identifier")}
     ${partReadonlyRow("Part Description", selectedPart.name, "Name of the part")}
     ${partReadonlyRow("Project", selectedPart.project, "Project folder assignment")}
-    ${partReadonlyRow("State", stateLabel(selectedPart.lifecycle_state), "Lifecycle state")}
+    ${partReadonlyRow("State", releaseStatusLabel(selectedPart), "Revision release status")}
     ${partReadonlyRow("Revision", selectedPart.revision || "V1", "Current revision")}
     ${partReadonlyRow("Last Edited By", selectedPart.owner, "Last user to update this component")}
     ${partReadonlyRow("Last Edited Date", selectedPart.updated_at, "Date of last edit")}
@@ -1417,35 +1677,6 @@ function partEditorSelectRow(label, field, value, options, notes) {
   `;
 }
 
-function renderSyncRows() {
-  tableHead.innerHTML = `
-    <tr>
-      <th scope="col">Action</th>
-      <th scope="col">Status</th>
-      <th scope="col">Command</th>
-      <th scope="col">Result</th>
-    </tr>
-  `;
-  partsList.innerHTML = `
-    ${syncRow("Pull latest master", "Ready", "git pull origin master", "Requires local Git bridge", "pull")}
-    ${syncRow("Push merge request", hasRepoChanges ? "Ready" : "No local changes", "branch + commit + push + MR", "Creates review request for approvers when backend is connected", "push")}
-    ${syncRow("Import parts CSV", "Ready", "browser upload", "Creates local Draft Rev A items from Part No, Name, Project", "import-csv")}
-    ${syncRow("Export migration CSV", "Ready", "browser download", "Downloads one row per revision", "export-csv")}
-    ${syncRow("Export PEAK JSON", "Ready", "browser download", "Downloads full working-copy snapshot", "export-json")}
-  `;
-}
-
-function syncRow(action, status, command, result, mode) {
-  return `
-    <tr>
-      <td><button class="iconButton primaryAction formAction" type="button" data-sync-action="${escapeHtml(mode)}">${escapeHtml(action)}</button></td>
-      <td>${escapeHtml(status)}</td>
-      <td><code>${escapeHtml(command)}</code></td>
-      <td>${escapeHtml(result)}</td>
-    </tr>
-  `;
-}
-
 function renderSettingsRows() {
   const tabBar = `
     <tr class="settingsTabRow">
@@ -1459,6 +1690,7 @@ function renderSettingsRows() {
     </tr>
   `;
   if (activeSettingsTab === "setup") {
+    ensureGitHubAuthStatus();
     tableHead.innerHTML = tabBar + `
       <tr>
         <th scope="col">Setting</th>
@@ -1485,13 +1717,9 @@ function renderSettingsRows() {
       <tr>
         <td>Product Data Remote</td>
         <td><input class="tableInput" value="${escapeHtml(productDataGithubUrl)}" readonly></td>
-        <td>Draft edits push directly to main in this GitHub repository</td>
+        <td>Draft edits push through the local PEAK runner using this machine's Git credentials</td>
       </tr>
-      <tr>
-        <td>GitHub Token</td>
-        <td><input class="tableInput" id="settingsGithubToken" type="password" value="${escapeHtml(localStorage.getItem("peakGithubToken") || "")}" autocomplete="off"></td>
-        <td>Requires contents write access to Launch-Canada/Product-Data</td>
-      </tr>
+      ${githubAuthSettingsRow()}
       <tr>
         <td colspan="3"><button class="iconButton primaryAction formAction" type="button" data-save-settings>Save Settings</button></td>
       </tr>
@@ -1518,6 +1746,30 @@ function renderSettingsRows() {
       </tr>
     `;
   }
+}
+
+function githubAuthSettingsRow() {
+  const status = githubAuthStatus;
+  const checking = githubAuthChecking && !status?.authenticated;
+  const state = status?.authenticated ? "Connected" : checking ? "Checking..." : "Not connected";
+  const detail = status?.authenticated
+    ? status.message
+    : status?.action || "Connect GitHub to create workflow merge requests.";
+  const button = status?.authenticated
+    ? `<button class="iconButton formAction" type="button" data-refresh-github-auth>Refresh</button>`
+    : `<button class="iconButton primaryAction formAction" type="button" data-connect-github${checking ? " disabled" : ""}>${checking ? "Connecting..." : "Connect GitHub"}</button>`;
+  return `
+    <tr>
+      <td>GitHub Merge Requests</td>
+      <td>
+        <div class="settingsActionCell">
+          <span class="settingsStatus ${status?.authenticated ? "success" : "warning"}">${escapeHtml(state)}</span>
+          ${button}
+        </div>
+      </td>
+      <td>${escapeHtml(detail)}</td>
+    </tr>
+  `;
 }
 
 function renderAppearanceTabRows() {
@@ -1636,8 +1888,10 @@ function partActionRail(part) {
       ${partActionButton("Open Onshape", "open-onshape", { disabled: !onshapeUrl })}
       ${partActionButton("Open WI", "open-work", { disabled: !workUrl })}
       ${partActionButton("Edit Part", "edit-part", { disabled: !canEdit, active: activePartEditMode })}
+      ${partActionButton("Edit Attachments", "edit-attachments", { active: activeAttachmentEditMode })}
       ${partActionButton("Submit to Workflow", "submit-workflow")}
       ${partActionButton("Copy Part ID", "copy-part-id")}
+      ${partActionButton("Pull Main", "pull-main")}
     </aside>
   `;
 }
@@ -1659,7 +1913,7 @@ function propertyTabs() {
 
 function renderPropertyBody(part) {
   if (activePropertyTab === "attachments") {
-    if (activePartEditMode) {
+    if (activeAttachmentEditMode) {
       return renderEditableAttachmentsTab(part);
     }
     return `
@@ -1681,10 +1935,6 @@ function renderPropertyBody(part) {
 }
 
 function renderEditableAttachmentsTab(part) {
-  if (!isDraftRevision(part)) {
-    activePartEditMode = false;
-    return renderAttachmentSections(part);
-  }
   return `
     <div class="attachmentToolbar">
       <button class="iconButton primaryAction attachmentAddButton" type="button" data-add-attachment-field title="Add attachment" aria-label="Add attachment">+</button>
@@ -1698,7 +1948,7 @@ function renderEditableAttachmentsTab(part) {
         </div>
       </section>
       <div class="partEditActions">
-        <button class="iconButton primaryAction formAction" type="button" data-save-open-part="${escapeHtml(partKey(part))}">Save Attachments</button>
+        <button class="iconButton primaryAction formAction" type="button" data-save-attachments="${escapeHtml(partKey(part))}">Save Attachments</button>
         <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
       </div>
     </div>
@@ -1733,18 +1983,21 @@ function attachmentTypeOptions() {
 
 function renderOverviewTab(part) {
   const editing = activePartEditMode && isDraftRevision(part);
+  const legacyPartNumber = legacyPartNumberValue(part);
+  const propertyRows = [
+    property("Part No", part.part_number),
+    editing || legacyPartNumber ? editing ? propertyEditInline("Legacy Part No", "legacy_part_number", legacyPartNumber) : property("Legacy Part No", legacyPartNumber) : "",
+    property("Revision", part.revision),
+    editing ? propertyEditInline("Name", "name", part.name) : property("Name", part.name),
+    editing ? propertyEditInline("Description", "description", part.description || "", { textarea: true }) : property("Description", part.description || "Not set"),
+    editing ? propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }) : property("Revision Description", part.change_summary || "Not set"),
+    property("Project", part.project || "Unassigned"),
+    editing ? propertyEditSelectInline("Traceability", "traceability", traceabilityValue(part), traceabilityOptions()) : property("Traceability", traceabilityLabel(part))
+  ].filter(Boolean);
   return `
     <div class="overviewLayout">
       <div class="overviewColumn">
-        ${detailSection("Properties", [
-          property("Part No", part.part_number),
-          property("Revision", part.revision),
-          editing ? propertyEditInline("Name", "name", part.name) : property("Name", part.name),
-          editing ? propertyEditInline("Description", "description", part.description || "", { textarea: true }) : property("Description", part.description || "Not set"),
-          editing ? propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }) : property("Revision Description", part.change_summary || "Not set"),
-          property("Project", part.project || "Unassigned"),
-          editing ? propertyEditInline("Traceability", "traceability", part.traceability || "") : property("Traceability", traceabilityLabel(part))
-        ])}
+        ${detailSection("Properties", propertyRows)}
         ${detailSection("Specifications", [
           editing ? propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")) : propertyLink("Google Drive Link", documentUrl(part, "drive")),
           editing ? propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")) : propertyLink("Onshape Link", documentUrl(part, "onshape")),
@@ -1798,24 +2051,51 @@ function propertyEditSelectInline(label, field, value, options) {
   `;
 }
 
+function traceabilityOptions() {
+  return ["SERIAL", "LOT"];
+}
+
 function renderHistoryTab(part) {
+  const activityItems = activityHistoryForPart(part);
   return `
     ${renderRevisionHistory(part)}
     <section class="propertySection">
       <h3>Activity</h3>
-      <div class="referenceList">
-        ${historyReference(part.created_at || "Unknown", "Created", `Created by ${createdBy(part)}`)}
-        ${historyReference(part.updated_at || "Unknown", "Updated", part.change_summary || "Record metadata updated")}
-      </div>
+      ${activityItems.length ? renderActivityHistory(activityItems) : `<p class="empty">No activity recorded for this part.</p>`}
     </section>
+  `;
+}
+
+function renderActivityHistory(items) {
+  const sorted = [...items].sort((a, b) => String(b.performed_at || "").localeCompare(String(a.performed_at || "")));
+  return `
+    <div class="activityList">
+      ${sorted.map((item) => `
+        <article class="activityItem">
+          <div class="activityMarker" aria-hidden="true"></div>
+          <div class="activityBody">
+            <div class="activityHeader">
+              <strong>${escapeHtml(activityActionLabel(item.action))}</strong>
+              <span>${escapeHtml(formatActivityTimestamp(item.performed_at))}</span>
+            </div>
+            <p>${escapeHtml(item.detail || activityDefaultDetail(item))}</p>
+            <small>${escapeHtml(item.actor || "Unknown user")}</small>
+          </div>
+        </article>
+      `).join("")}
+    </div>
   `;
 }
 
 function renderWorkflowTab(part) {
   const maturityTransition = nextMaturityTransition(part);
   const revisionTransition = nextRevisionTransition(part);
+  const revertTransition = revisionStatusValue(part) === "release_candidate" ? { to: "draft", mode: "direct", action: "revert" } : null;
+  const deleteTransition = isDraftRevision(part) ? { to: "delete", mode: "direct", action: "delete" } : null;
   const maturityRule = maturityWorkflowRule(part, maturityTransition?.to);
   const revisionRule = revisionWorkflowRule(part, revisionTransition?.to);
+  const revertRule = revertTransition ? revisionWorkflowRule(part, "draft") : workflowRule([]);
+  const deleteRule = deleteTransition ? revisionWorkflowRule(part, "delete") : workflowRule([]);
   return `
     <section class="propertySection workflowSection">
       <h3>Product Maturity</h3>
@@ -1827,7 +2107,8 @@ function renderWorkflowTab(part) {
         ${property("Approval", maturityTransition ? "Merge request" : "Complete")}
       </dl>
       ${workflowCriteriaList(maturityRule)}
-      ${workflowActionButton(maturityTransition, maturityRule, `Transition to ${maturityTransition ? maturityStageText(maturityTransition.to) : ""}`, "maturity")}
+      ${workflowActionButton(maturityTransition, maturityRule, `Transition to ${maturityTransition ? maturityStageText(maturityTransition.to) : ""}`, "maturity", part)}
+      ${workflowFeedbackMessage("maturity", part)}
     </section>
     <section class="propertySection workflowSection">
       <h3>Revision Status</h3>
@@ -1839,7 +2120,28 @@ function renderWorkflowTab(part) {
         ${property("Approval", revisionTransition?.mode === "direct" ? "Direct remote push" : revisionTransition ? "Merge request" : "Complete")}
       </dl>
       ${workflowCriteriaList(revisionRule)}
-      ${workflowActionButton(revisionTransition, revisionRule, revisionTransition?.to === "release_candidate" ? "Set Release Candidate" : `Transition to ${revisionTransition ? revisionStatusText(revisionTransition.to) : ""}`, "revision")}
+      ${workflowActionButtons([
+        {
+          transition: revisionTransition,
+          rule: revisionRule,
+          label: revisionTransition?.to === "release_candidate" ? "Set Release Candidate" : `Transition to ${revisionTransition ? revisionStatusText(revisionTransition.to) : ""}`,
+          workflow: "revision"
+        },
+        {
+          transition: revertTransition,
+          rule: revertRule,
+          label: "Revert to Draft",
+          workflow: "revision"
+        },
+        {
+          transition: deleteTransition,
+          rule: deleteRule,
+          label: "Delete Draft Revision",
+          workflow: "revision",
+          danger: true
+        }
+      ], part)}
+      ${workflowFeedbackMessage("revision", part)}
     </section>
     ${referenceSection("Approvers", part.approvers ?? [], approverReference)}
   `;
@@ -1864,15 +2166,64 @@ function workflowTimeline(states, current, labeler) {
   return `<div class="maturityTimeline workflowTimeline">${items.join("")}<div class="timelineArrow" aria-hidden="true"></div></div>`;
 }
 
-function workflowActionButton(transition, rule, label, workflow) {
+function workflowActionButton(transition, rule, label, workflow, part) {
   if (!transition) {
     return "";
   }
+  const feedback = workflowFeedbackFor(workflow, part);
+  const isRunning = feedback?.state === "running";
   return `
     <div class="workflowActions">
-      <button class="iconButton primaryAction formAction" type="button" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(transition.to)}"${rule.ready ? "" : " disabled"}>${escapeHtml(label)}</button>
+      <button class="iconButton primaryAction formAction" type="button" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(transition.to)}"${rule.ready && !isRunning ? "" : " disabled"}>${escapeHtml(isRunning ? "Working..." : label)}</button>
     </div>
   `;
+}
+
+function workflowActionButtons(actions, part) {
+  const buttons = actions
+    .filter((action) => action.transition)
+    .map((action) => {
+      const feedback = workflowFeedbackFor(action.workflow, part);
+      const isRunning = feedback?.state === "running";
+      const className = action.danger ? "iconButton formAction dangerAction" : "iconButton primaryAction formAction";
+      return `<button class="${className}" type="button" data-workflow-action="${escapeHtml(action.workflow)}" data-workflow-to="${escapeHtml(action.transition.to)}"${action.rule.ready && !isRunning ? "" : " disabled"}>${escapeHtml(isRunning ? "Working..." : action.label)}</button>`;
+    })
+    .join("");
+  return buttons ? `<div class="workflowActions">${buttons}</div>` : "";
+}
+
+function workflowFeedbackMessage(workflow, part) {
+  const feedback = workflowFeedbackFor(workflow, part);
+  if (!feedback?.message) {
+    return "";
+  }
+  return `
+    <div class="workflowFeedback ${escapeHtml(feedback.state)}" role="status">
+      <span>${escapeHtml(feedback.message)}</span>
+      ${feedback.action === "connect-github" ? `<button class="iconButton formAction workflowFeedbackAction" type="button" data-workflow-connect-github="${escapeHtml(workflow)}">Connect GitHub</button>` : ""}
+    </div>
+  `;
+}
+
+function workflowFeedbackFor(workflow, part) {
+  return workflowFeedback[workflowFeedbackKey(workflow, part)];
+}
+
+function setWorkflowFeedback(workflow, part, state, message, options = {}) {
+  workflowFeedback = {
+    ...workflowFeedback,
+    [workflowFeedbackKey(workflow, part)]: {
+      state,
+      message,
+      action: options.action || "",
+      updatedAt: Date.now()
+    }
+  };
+}
+
+function workflowFeedbackKey(workflow, part) {
+  const scope = workflow === "maturity" ? part?.part_number : partObjectLabel(part);
+  return `${workflow}:${scope || "none"}`;
 }
 
 function workflowCriteriaList(rule) {
@@ -1919,12 +2270,26 @@ function propertyHtml(label, value) {
 }
 
 function traceabilityLabel(part) {
-  const parentCount = whereUsed(part).length;
-  const childCount = (part.bom ?? []).length;
-  if (!parentCount && !childCount) {
-    return "Standalone";
+  return traceabilityValue(part) || "Not set";
+}
+
+function legacyPartNumberValue(part) {
+  return String(part?.legacy_part_number || part?.legacyPartNumber || part?.part_properties?.legacy_part_number || part?.part_properties?.legacyPartNumber || "").trim();
+}
+
+function traceabilityValue(part) {
+  return normalizeTraceability(part?.traceability);
+}
+
+function normalizeTraceability(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "SERIAL" || normalized.includes("SERIAL")) {
+    return "SERIAL";
   }
-  return `${parentCount} parent${parentCount === 1 ? "" : "s"} / ${childCount} child${childCount === 1 ? "" : "ren"}`;
+  if (normalized === "LOT" || normalized.includes("LOT") || normalized.includes("BATCH")) {
+    return "LOT";
+  }
+  return "";
 }
 
 function documentUrl(part, kind) {
@@ -2019,6 +2384,138 @@ function updatedBy(part) {
   return part.updated_by || part.last_updated_by || part.owner || "Not set";
 }
 
+function activityHistoryForPart(part) {
+  const explicit = asArray(part?.activity_history || part?.revision_properties?.activity_history);
+  if (explicit.length) {
+    return explicit.map(normalizeActivityEntry).filter(Boolean);
+  }
+  return legacyActivityHistory(part);
+}
+
+function legacyActivityHistory(part) {
+  if (!part) {
+    return [];
+  }
+  const entries = [];
+  if (part.created_at) {
+    entries.push(normalizeActivityEntry({
+      id: activityId(part, "create", part.created_at),
+      action: "create",
+      actor: createdBy(part),
+      performed_at: part.created_at,
+      detail: `Created ${partObjectLabel(part)}`
+    }));
+  }
+  if (part.updated_at && part.updated_at !== part.created_at) {
+    entries.push(normalizeActivityEntry({
+      id: activityId(part, "updated_properties", part.updated_at),
+      action: "updated_properties",
+      actor: updatedBy(part),
+      performed_at: part.updated_at,
+      detail: part.change_summary || `Updated ${partObjectLabel(part)}`
+    }));
+  }
+  return entries;
+}
+
+function normalizeActivityEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  return {
+    id: entry.id || activityId(entry, entry.action, entry.performed_at),
+    action: normalizeActivityAction(entry.action),
+    actor: entry.actor || entry.user || entry.updated_by || "Unknown user",
+    performed_at: entry.performed_at || entry.timestamp || entry.date || "",
+    detail: entry.detail || entry.summary || ""
+  };
+}
+
+function normalizeActivityAction(action) {
+  const normalized = String(action || "").trim().toLowerCase().replaceAll(" ", "_").replaceAll("-", "_");
+  const actions = {
+    create: "create",
+    created: "create",
+    updated_properties: "updated_properties",
+    update_properties: "updated_properties",
+    updated_maturity: "updated_maturity",
+    update_maturity: "updated_maturity",
+    updated_revision: "updated_revision",
+    update_revision: "updated_revision",
+    created_revision: "created_revision",
+    create_revision: "created_revision",
+    updated_attachments: "updated_attachments",
+    update_attachments: "updated_attachments"
+  };
+  return actions[normalized] || normalized || "updated_properties";
+}
+
+function activityActionLabel(action) {
+  const labels = {
+    create: "Create",
+    updated_properties: "Updated Properties",
+    updated_maturity: "Updated Maturity",
+    updated_revision: "Updated Revision",
+    created_revision: "Created Revision",
+    updated_attachments: "Updated Attachments"
+  };
+  return labels[normalizeActivityAction(action)] || stateLabel(action);
+}
+
+function activityDefaultDetail(item) {
+  return `${activityActionLabel(item.action)} by ${item.actor || "Unknown user"}`;
+}
+
+function formatActivityTimestamp(value) {
+  if (!value) {
+    return "Unknown time";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
+function activityTimestamp() {
+  return new Date().toISOString();
+}
+
+function activityId(part, action, timestamp = activityTimestamp()) {
+  const scope = partKey(part) || `${part?.part_number || "part"}^${part?.revision || "rev"}`;
+  const random = Math.random().toString(36).slice(2, 8);
+  return `${scope}:${normalizeActivityAction(action)}:${String(timestamp).replace(/[^0-9A-Za-z]/g, "")}:${random}`;
+}
+
+function appendPartActivity(part, action, detail, options = {}) {
+  if (!part) {
+    return null;
+  }
+  const entry = normalizeActivityEntry({
+    id: options.id || activityId(part, action, options.performedAt),
+    action,
+    actor: options.actor || currentEditorName(),
+    performed_at: options.performedAt || activityTimestamp(),
+    detail
+  });
+  const explicit = asArray(part.activity_history || part.revision_properties?.activity_history)
+    .map(normalizeActivityEntry)
+    .filter(Boolean);
+  const history = [...explicit, entry].filter(Boolean);
+  part.activity_history = history;
+  part.revision_properties = {
+    ...(part.revision_properties || {}),
+    activity_history: history
+  };
+  return entry;
+}
+
 function releaseStatusLabel(part) {
   const state = part.release_status || part.lifecycle_state;
   const labels = {
@@ -2048,6 +2545,33 @@ function isDraftRevision(part) {
 
 function draftRevisionsForPart(partNumber, { excludeKey = "" } = {}) {
   return parts.filter((part) => part.part_number === partNumber && partKey(part) !== excludeKey && isDraftRevision(part));
+}
+
+function isUnreleasedRevision(part) {
+  return ["draft", "release_candidate"].includes(revisionStatusValue(part));
+}
+
+function unreleasedRevisionsForPart(partNumber, { excludeKey = "" } = {}) {
+  return parts.filter((part) => part.part_number === partNumber && partKey(part) !== excludeKey && isUnreleasedRevision(part));
+}
+
+function previousRevisionsForPart(part) {
+  return sortRevisions(parts.filter((candidate) => candidate.part_number === part.part_number && compareRevisionLabels(candidate.revision, part.revision) < 0));
+}
+
+function revisionStatusRank(state) {
+  const ranks = {
+    draft: 0,
+    release_candidate: 1,
+    released: 2,
+    obsolete: 3
+  };
+  return ranks[revisionStatusValue({ release_status: state, lifecycle_state: state })] ?? 0;
+}
+
+function priorRevisionsAtLeast(part, target) {
+  const targetRank = revisionStatusRank(target);
+  return previousRevisionsForPart(part).every((revisionPart) => revisionStatusRank(revisionStatusValue(revisionPart)) >= targetRank);
 }
 
 function currentEditorName() {
@@ -2136,19 +2660,32 @@ function revisionWorkflowRule(part, target) {
   if (target === "release_candidate") {
     return workflowRule([
       ["Current revision is Draft", revisionStatusValue(part) === "draft"],
-      ["All required properties are set", partPropertiesComplete(part)],
-      ["Google Drive link is provided", Boolean(documentUrl(part, "drive"))],
-      ["Onshape link is provided", Boolean(documentUrl(part, "onshape"))]
+      ["No other unreleased revision exists", unreleasedRevisionsForPart(part.part_number, { excludeKey: partKey(part) }).length === 0],
+      ["Previous revisions are at least Release Candidate", priorRevisionsAtLeast(part, target)],
+      ["All required properties are set", partPropertiesComplete(part)]
     ]);
   }
-  if (target === "released") {
+  if (target === "draft") {
     return workflowRule([
       ["Current revision is Release Candidate", revisionStatusValue(part) === "release_candidate"]
     ]);
   }
+  if (target === "released") {
+    return workflowRule([
+      ["Current revision is Release Candidate", revisionStatusValue(part) === "release_candidate"],
+      ["Previous revisions are at least Released", priorRevisionsAtLeast(part, target)],
+      ["Google Drive, Onshape, and WI links are present", allRequiredLinksPresent(part)]
+    ]);
+  }
   if (target === "obsolete") {
     return workflowRule([
-      ["Current revision is Released", revisionStatusValue(part) === "released"]
+      ["Current revision is Released", revisionStatusValue(part) === "released"],
+      ["Previous revisions are Obsolete", priorRevisionsAtLeast(part, target)]
+    ]);
+  }
+  if (target === "delete") {
+    return workflowRule([
+      ["Current revision is Draft", isDraftRevision(part)]
     ]);
   }
   return workflowRule([]);
@@ -2164,8 +2701,7 @@ function maturityWorkflowRule(part, target) {
   if (target === "production") {
     return workflowRule([
       ["Current maturity is NPI", maturityStageValue(part) === "npi"],
-      ["All required properties are set", partPropertiesComplete(part)],
-      ["Google Drive, Onshape, and WI links are present", allRequiredLinksPresent(part)]
+      ["All required properties are set", partPropertiesComplete(part)]
     ]);
   }
   if (target === "sunset") {
@@ -2195,8 +2731,7 @@ function partPropertiesComplete(part) {
     part.revision,
     part.name,
     part.description,
-    part.project,
-    part.traceability,
+    traceabilityValue(part),
     createdBy(part) !== "Not set" ? createdBy(part) : "",
     part.created_at,
     updatedBy(part) !== "Not set" ? updatedBy(part) : "",
@@ -2215,8 +2750,9 @@ function releasedRevisionsForPart(partNumber) {
   return parts.filter((part) => part.part_number === partNumber && revisionStatusValue(part) === "released");
 }
 
-function revisionWorkflowMrTitle(part) {
-  return `${part.part_number}^${part.revision || "A"}`;
+function revisionWorkflowMrTitle(part, target = "") {
+  const suffix = target ? ` to ${revisionStatusText(target)}` : "";
+  return `${part.part_number}^${part.revision || "A"}${suffix}`;
 }
 
 function maturityWorkflowMrTitle(part, maturity) {
@@ -2296,15 +2832,15 @@ function renderRevisionHistory(part) {
     <section class="propertySection">
       <h3>Revision History</h3>
       <div class="detailTableWrap">
-        <table class="detailTable">
+        <table class="detailTable revisionHistoryTable">
           <thead>
             <tr>
               <th scope="col">Object</th>
-              <th scope="col">Release Status</th>
-              <th scope="col">Last Updated By</th>
-              <th scope="col">Last Updated Date</th>
+              <th scope="col">Status</th>
+              <th scope="col">Updated By</th>
+              <th scope="col">Updated</th>
               <th scope="col">Created By</th>
-              <th scope="col">Created Date</th>
+              <th scope="col">Created</th>
             </tr>
           </thead>
           <tbody>
@@ -2361,7 +2897,7 @@ function revisionRow(revision) {
   const objectLabel = `${revision.partNumber || "Part"}^${revision.revision || "V1"}`;
   return `
     <tr>
-      <td><button class="linkButton" type="button" data-part-number="${escapeHtml(revision.objectId || objectLabel)}">${escapeHtml(objectLabel)}</button></td>
+      <td><button class="linkButton" type="button" data-part-number="${escapeHtml(revision.objectId || objectLabel)}" data-history-revision="true">${escapeHtml(objectLabel)}</button></td>
       <td>${escapeHtml(releaseStatusLabel({ lifecycle_state: revision.status, release_status: revision.status }))}</td>
       <td>${escapeHtml(revision.updatedBy || "Not set")}</td>
       <td>${escapeHtml(revision.updatedAt || "Not set")}</td>
@@ -2510,7 +3046,7 @@ function renderNavigationTree() {
     return;
   }
 
-  if (activeNavMode === "table") {
+  if (activeNavMode === "table" || activeNavMode === "history") {
     navigationTree.innerHTML = "";
     return;
   }
@@ -2523,17 +3059,6 @@ function renderNavigationTree() {
         <button class="treeNode" type="button" data-filter-state="draft">Draft parts</button>
         <button class="treeNode" type="button" data-filter-state="release_candidate">Release candidates</button>
         <button class="treeNode" type="button" data-filter-state="released">Released parts</button>
-      </div>
-    `;
-    return;
-  }
-
-  if (activeNavMode === "sync") {
-    navigationTree.innerHTML = `
-      <div class="treeGroup">
-        <p>Sync</p>
-        <button class="treeNode root" type="button" data-sync-action="pull">Pull master</button>
-        <button class="treeNode" type="button" data-sync-action="push">Create merge request</button>
       </div>
     `;
     return;
@@ -2558,7 +3083,7 @@ function renderNavigationTree() {
       <p>Saved Searches</p>
       ${states
         .map((state) => {
-          const count = parts.filter((part) => lifecycleMatches(part.lifecycle_state, state)).length;
+          const count = parts.filter((part) => lifecycleMatches(revisionStatusValue(part), state)).length;
           return `<button class="treeNode" type="button" data-filter-state="${escapeHtml(state)}">${escapeHtml(stateLabel(state))} (${count})</button>`;
         })
         .join("")}
@@ -2595,7 +3120,22 @@ function renderBomTree() {
         <span class="bomName">${escapeHtml(rootPart.name)}</span>
         <span class="bomQty">1 each</span>
       </button>
+      ${activePartEditMode && activeBomAddParent === partKey(rootPart) ? renderBomAddRow(rootPart) : ""}
       ${childRows || '<div class="treeEmpty">No child components</div>'}
+    </div>
+  `;
+}
+
+function renderBomAddRow(parentPart) {
+  return `
+    <div class="treeNode bomNode bomAddRow" data-bom-add-parent="${escapeHtml(partKey(parentPart))}" role="row">
+      <input class="tableInput bomAddPartInput" data-bom-add-field="part" placeholder="Part number or Part ID">
+      <span class="bomName">New component</span>
+      <div class="bomAddControls">
+        <input class="tableInput bomQtyInput" data-bom-add-field="quantity" type="number" min="0.001" step="any" value="1">
+        <button class="iconButton primaryAction bomAddSaveButton" type="button" data-save-bom-add>Save</button>
+        <button class="iconButton bomAddCancelButton" type="button" data-cancel-bom-add>Cancel</button>
+      </div>
     </div>
   `;
 }
@@ -2676,6 +3216,10 @@ function projectDriveUrl(project) {
   return customProjects.find((candidate) => candidate.name === project)?.drive_url || "";
 }
 
+function projectAllowsCustomPartNumbers(project) {
+  return customProjects.find((candidate) => candidate.name === project)?.allow_custom_part_numbers === true;
+}
+
 function projectApprovers(project) {
   const custom = customProjects.find((candidate) => candidate.name === project);
   if (Array.isArray(custom?.approvers)) {
@@ -2696,7 +3240,7 @@ function nextProjectPartNumber(project) {
     .map((partNumber) => Number(partNumber.slice(prefix.length)))
     .filter(Number.isFinite);
   const next = numbers.length ? Math.max(...numbers) + 1 : 1;
-  return `${prefix}${String(next).padStart(5, "0")}`;
+  return `${prefix}${next}`;
 }
 
 function applyNavMode(mode) {
@@ -2704,6 +3248,7 @@ function applyNavMode(mode) {
   openedPartNumber = null;
   selectedBomPartNumber = null;
   activePartEditMode = false;
+  activeAttachmentEditMode = false;
   activeProjectEditMode = false;
   const url = new URL(window.location.href);
   url.searchParams.delete("part");
@@ -2718,7 +3263,7 @@ function applyNavMode(mode) {
     activeResultView = "grid";
   }
 
-  if (mode === "create" || mode === "projects" || mode === "sync" || mode === "table" || mode === "report" || mode === "settings") {
+  if (mode === "create" || mode === "projects" || mode === "history" || mode === "table" || mode === "report" || mode === "settings") {
     searchInput.value = "";
     stateFilter.value = "";
     projectFilter.value = "";
@@ -2737,6 +3282,7 @@ function openSelectedPart({ newTab = false, editMode = false } = {}) {
   openedPartNumber = selectedPartNumber;
   selectedBomPartNumber = selectedPartNumber;
   activePartEditMode = editMode;
+  activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
   activeNavMode = "part";
   window.history.replaceState({}, "", url);
@@ -2753,6 +3299,7 @@ function moveToPart(partNumber, { editMode = false } = {}) {
   openedPartNumber = objectId;
   selectedBomPartNumber = objectId;
   activePartEditMode = editMode;
+  activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
   activeNavMode = "part";
   window.history.replaceState({}, "", partUrl(objectId, { editMode }));
@@ -2776,10 +3323,10 @@ function partUrl(identifier, { editMode = false } = {}) {
 
 function syncChrome() {
   const isOpened = activeNavMode === "part";
-  const isSinglePane = ["create", "sync", "settings"].includes(activeNavMode);
+  const isSinglePane = ["create", "settings"].includes(activeNavMode);
   const isReportPane = activeNavMode === "report";
   const isProjectPane = activeNavMode === "projects";
-  const isTablePane = activeNavMode === "table";
+  const isTablePane = activeNavMode === "table" || activeNavMode === "history";
   document.body.classList.toggle("openedPartMode", isOpened);
   document.body.classList.toggle("searchMode", !isOpened);
   workspace.classList.toggle("partWorkspace", isOpened);
@@ -3040,6 +3587,10 @@ partDetail.addEventListener("click", (event) => {
       handleTabularAction(partAction.dataset.partAction);
       return;
     }
+    if (activeNavMode === "history") {
+      handleHistoryAction(partAction.dataset.partAction);
+      return;
+    }
     handlePartAction(partAction.dataset.partAction);
     return;
   }
@@ -3047,6 +3598,7 @@ partDetail.addEventListener("click", (event) => {
   const cancelPartEdit = event.target.closest("[data-cancel-part-edit]");
   if (cancelPartEdit) {
     activePartEditMode = false;
+    activeAttachmentEditMode = false;
     activeAttachmentDraftCount = 0;
     if (openedPartNumber) {
       window.history.replaceState({}, "", partUrl(openedPartNumber));
@@ -3061,10 +3613,16 @@ partDetail.addEventListener("click", (event) => {
     return;
   }
 
+  const saveAttachmentsButton = event.target.closest("[data-save-attachments]");
+  if (saveAttachmentsButton) {
+    handleSaveAttachments(saveAttachmentsButton.dataset.saveAttachments);
+    return;
+  }
+
   const propertyTab = event.target.closest("[data-property-tab]");
   if (propertyTab) {
     activePropertyTab = propertyTab.dataset.propertyTab;
-    if (activePropertyTab !== "attachments") {
+    if (activePropertyTab !== "attachments" || !activeAttachmentEditMode) {
       activeAttachmentDraftCount = 0;
     }
     renderApp();
@@ -3073,7 +3631,18 @@ partDetail.addEventListener("click", (event) => {
 
   const workflowButton = event.target.closest("[data-workflow-action]");
   if (workflowButton) {
-    runWorkflowTransition(workflowButton.dataset.workflowAction, workflowButton.dataset.workflowTo);
+    runWorkflowTransition(workflowButton.dataset.workflowAction, workflowButton.dataset.workflowTo).catch((error) => {
+      statusMessage = `Workflow transition failed: ${error.message}`;
+      renderApp();
+    });
+    return;
+  }
+
+  const workflowConnectGitHub = event.target.closest("[data-workflow-connect-github]");
+  if (workflowConnectGitHub) {
+    const workflow = workflowConnectGitHub.dataset.workflowConnectGithub;
+    const part = getSelectedBomPart() || getOpenedPart() || findPartByKey(selectedPartNumber);
+    connectGitHub({ workflow, part });
     return;
   }
 
@@ -3081,8 +3650,13 @@ partDetail.addEventListener("click", (event) => {
   if (!button) {
     return;
   }
+  if (button.dataset.historyRevision === "true" && activeNavMode === "part") {
+    moveToPart(button.dataset.partNumber);
+    return;
+  }
   selectedPartNumber = button.dataset.partNumber;
   selectedBomPartNumber = button.dataset.partNumber;
+  activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
   if (openedPartNumber) {
     renderApp();
@@ -3091,6 +3665,10 @@ partDetail.addEventListener("click", (event) => {
 
 function handlePartAction(action) {
   const part = getSelectedBomPart() || getOpenedPart();
+  if (action === "pull-main") {
+    pullMainFromRunner();
+    return;
+  }
   if (!part) {
     return;
   }
@@ -3114,14 +3692,28 @@ function handlePartAction(action) {
       return;
     }
     activePartEditMode = true;
+    activeAttachmentEditMode = false;
     activePropertyTab = "overview";
     activeAttachmentDraftCount = 0;
     window.history.replaceState({}, "", partUrl(partKey(part), { editMode: true }));
     renderApp();
     return;
   }
+  if (action === "edit-attachments") {
+    activePartEditMode = false;
+    activeAttachmentEditMode = true;
+    activePropertyTab = "attachments";
+    activeAttachmentDraftCount = 0;
+    statusMessage = `Editing attachments for ${partObjectLabel(part)}`;
+    if (openedPartNumber) {
+      window.history.replaceState({}, "", partUrl(openedPartNumber));
+    }
+    renderApp();
+    return;
+  }
   if (action === "submit-workflow") {
     activePartEditMode = false;
+    activeAttachmentEditMode = false;
     activePropertyTab = "workflow";
     statusMessage = `Opened workflow for ${partObjectLabel(part)}`;
     if (openedPartNumber) {
@@ -3136,6 +3728,10 @@ function handlePartAction(action) {
 }
 
 function handleProjectAction(action) {
+  if (action === "pull-main") {
+    pullMainFromRunner();
+    return;
+  }
   const project = selectedProjectName || projects()[0] || "";
   if (!project) {
     return;
@@ -3155,6 +3751,17 @@ function handleProjectAction(action) {
 }
 
 function handleTabularAction(action) {
+  if (action === "pull-main") {
+    pullMainFromRunner();
+    return;
+  }
+  if (action === "push-tabular") {
+    pushTabularChangesToRunner().catch((error) => {
+      statusMessage = `Table push failed: ${error.message}`;
+      renderApp();
+    });
+    return;
+  }
   if (action === "import-tabular") {
     importCsvFromPicker();
     return;
@@ -3168,24 +3775,35 @@ function handleTabularAction(action) {
   }
 }
 
-function runWorkflowTransition(workflow, target) {
+function handleHistoryAction(action) {
+  if (action === "pull-main") {
+    pullMainFromRunner();
+  }
+}
+
+async function runWorkflowTransition(workflow, target) {
   const part = getSelectedBomPart() || getOpenedPart() || findPartByKey(selectedPartNumber);
   if (!part || !target) {
     return;
   }
 
   if (workflow === "revision") {
-    transitionRevisionWorkflow(part, target);
+    await transitionRevisionWorkflow(part, target);
     return;
   }
 
   if (workflow === "maturity") {
-    transitionMaturityWorkflow(part, target);
+    await transitionMaturityWorkflow(part, target);
   }
 }
 
-function transitionRevisionWorkflow(part, target) {
-  const transition = nextRevisionTransition(part);
+async function transitionRevisionWorkflow(part, target) {
+  const transition =
+    target === "draft" && revisionStatusValue(part) === "release_candidate"
+      ? { to: "draft", mode: "direct", action: "revert" }
+      : target === "delete" && isDraftRevision(part)
+        ? { to: "delete", mode: "direct", action: "delete" }
+        : nextRevisionTransition(part);
   if (!transition || transition.to !== target) {
     statusMessage = `Cannot transition ${partObjectLabel(part)} to ${revisionStatusText(target)} from ${releaseStatusLabel(part)}.`;
     renderApp();
@@ -3198,27 +3816,53 @@ function transitionRevisionWorkflow(part, target) {
     return;
   }
 
-  stampPartRevision(part, target);
-  part.workflow = {
-    type: "revision",
-    status: target,
-    approval: transition.mode,
-    mr_title: transition.mode === "mr" ? revisionWorkflowMrTitle(part) : null,
-    updated_at: part.updated_at
-  };
-  part.revision_properties = {
-    ...(part.revision_properties || {}),
-    workflow: part.workflow
-  };
-  persistLocalChanges();
   const label = partObjectLabel(part);
-  statusMessage = transition.mode === "direct"
-    ? `${label} set to ${revisionStatusText(target)}; direct remote push queued.`
-    : `${label} set to ${revisionStatusText(target)}; MR required with title "${revisionWorkflowMrTitle(part)}".`;
+  const title = transition.mode === "mr" ? revisionWorkflowMrTitle(part, target) : target === "delete" ? `Delete ${label}` : `Set ${label} to ${revisionStatusText(target)}`;
+  const performedAt = activityTimestamp();
+  let files;
+  let deletePaths = [];
+  if (transition.mode === "direct") {
+    if (target === "delete") {
+      deletePaths = productDataDeletePathsForRevision(part);
+      deleteDraftRevision(part, performedAt);
+    } else {
+      stampPartRevision(part, target);
+      appendPartActivity(part, "updated_revision", `${label} revision status changed to ${revisionStatusText(target)}`, { performedAt });
+      part.workflow = revisionWorkflowRecord(part, target, transition.mode, null);
+      part.revision_properties = {
+        ...(part.revision_properties || {}),
+        workflow: part.workflow
+      };
+    }
+    await persistLocalChanges();
+    statusMessage = target === "delete"
+      ? `${label} deleted locally; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`
+      : `${label} set to ${revisionStatusText(target)}; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+    setWorkflowFeedback("revision", part, "running", `Pushing ${label} to main...`);
+    files = productDataSnapshotFiles();
+  } else {
+    if (!(await ensureGitHubReadyForMergeRequest("revision", part))) {
+      return;
+    }
+    const proposedParts = proposedRevisionWorkflowParts(part, target, transition.mode, performedAt);
+    statusMessage = `${label} proposed for ${revisionStatusText(target)}; creating merge request "${title}".`;
+    setWorkflowFeedback("revision", part, "running", `Creating merge request "${title}"...`);
+    files = productDataSnapshotFiles(proposedParts);
+  }
   renderApp();
+  await pushWorkflowTransitionToRunner({
+    workflow: "revision",
+    mode: transition.mode,
+    title,
+    label,
+    target,
+    part,
+    files,
+    deletePaths
+  });
 }
 
-function transitionMaturityWorkflow(part, target) {
+async function transitionMaturityWorkflow(part, target) {
   const transition = nextMaturityTransition(part);
   if (!transition || transition.to !== target) {
     statusMessage = `Cannot transition ${part.part_number} to ${maturityStageText(target)} from ${maturityStageLabel(part)}.`;
@@ -3232,36 +3876,121 @@ function transitionMaturityWorkflow(part, target) {
     return;
   }
 
+  if (!(await ensureGitHubReadyForMergeRequest("maturity", part))) {
+    return;
+  }
+  const files = productDataSnapshotFiles(proposedMaturityWorkflowParts(part, target, activityTimestamp()));
+  statusMessage = `${part.part_number} maturity proposed for ${maturityStageText(target)}; creating merge request "${maturityWorkflowMrTitle(part, target)}".`;
+  setWorkflowFeedback("maturity", part, "running", `Creating merge request "${maturityWorkflowMrTitle(part, target)}"...`);
+  renderApp();
+  await pushWorkflowTransitionToRunner({
+    workflow: "maturity",
+    mode: "mr",
+    title: maturityWorkflowMrTitle(part, target),
+    label: `${part.part_number} maturity ${maturityStageText(target)}`,
+    target,
+    part,
+    files
+  });
+}
+
+async function ensureGitHubReadyForMergeRequest(workflow, part) {
+  const status = await refreshGitHubAuthStatus({ render: false });
+  if (status?.authenticated) {
+    return true;
+  }
+  const message = `${status?.message || "GitHub is not connected."} ${status?.action || "Connect GitHub, then retry this workflow action."}`.trim();
+  setWorkflowFeedback(workflow, part, "error", message, { action: "connect-github" });
+  statusMessage = "Connect GitHub before creating a workflow merge request.";
+  renderApp();
+  return false;
+}
+
+function proposedRevisionWorkflowParts(part, target, mode, performedAt = activityTimestamp()) {
+  const proposedParts = structuredCloneSafe(parts);
+  const proposedPart = proposedParts.find((candidate) => partKey(candidate) === partKey(part));
+  if (!proposedPart) {
+    return proposedParts;
+  }
+  stampPartRevision(proposedPart, target);
+  appendPartActivity(proposedPart, "updated_revision", `${partObjectLabel(proposedPart)} revision status changed to ${revisionStatusText(target)}`, { performedAt });
+  proposedPart.workflow = revisionWorkflowRecord(proposedPart, target, mode, mode === "mr" ? revisionWorkflowMrTitle(proposedPart, target) : null);
+  proposedPart.revision_properties = {
+    ...(proposedPart.revision_properties || {}),
+    workflow: proposedPart.workflow
+  };
+  return proposedParts;
+}
+
+function proposedMaturityWorkflowParts(part, target, performedAt = activityTimestamp()) {
+  const proposedParts = structuredCloneSafe(parts);
   const editor = currentEditorName();
   const today = new Date().toISOString().slice(0, 10);
-  const siblings = parts.filter((candidate) => candidate.part_number === part.part_number);
-  siblings.forEach((sibling) => {
-    sibling.maturity = target;
-    sibling.updated_by = editor;
-    sibling.owner = editor;
-    sibling.updated_at = today;
-    sibling.workflow = {
-      type: "maturity",
-      status: target,
-      approval: "mr",
-      mr_title: maturityWorkflowMrTitle(part, target),
-      updated_at: today
-    };
-    sibling.part_properties = {
-      ...(sibling.part_properties || {}),
-      maturity: target,
-      workflow: sibling.workflow
-    };
-  });
-  persistLocalChanges();
-  statusMessage = `${part.part_number} maturity set to ${maturityStageText(target)}; MR required with title "${maturityWorkflowMrTitle(part, target)}".`;
-  renderApp();
+  proposedParts
+    .filter((candidate) => candidate.part_number === part.part_number)
+    .forEach((sibling) => {
+      sibling.maturity = target;
+      sibling.updated_by = editor;
+      sibling.owner = editor;
+      sibling.updated_at = today;
+      appendPartActivity(sibling, "updated_maturity", `${sibling.part_number} maturity changed to ${maturityStageText(target)}`, { actor: editor, performedAt });
+      sibling.workflow = maturityWorkflowRecord(sibling, target);
+      sibling.part_properties = {
+        ...(sibling.part_properties || {}),
+        maturity: target,
+        workflow: sibling.workflow
+      };
+    });
+  return proposedParts;
+}
+
+function deleteDraftRevision(part, performedAt = activityTimestamp()) {
+  const deletedKey = partKey(part);
+  const partNumber = part.part_number;
+  const remaining = parts.filter((candidate) => partKey(candidate) !== deletedKey);
+  const siblingRevisions = remaining
+    .filter((candidate) => candidate.part_number === partNumber)
+    .map((candidate) => `${candidate.part_number}^${candidate.revision || "A"}.json`)
+    .sort();
+  remaining
+    .filter((candidate) => candidate.part_number === partNumber)
+    .forEach((candidate) => {
+      candidate.part_properties = {
+        ...(candidate.part_properties || {}),
+        revisions: siblingRevisions
+      };
+    });
+  appendPartActivity(part, "updated_revision", `${deletedKey} draft revision deleted`, { performedAt });
+  parts = sortParts(remaining);
+  const fallback = latestRevisionForPart(partNumber) || parts[0];
+  selectedPartNumber = fallback ? partKey(fallback) : null;
+  openedPartNumber = selectedPartNumber;
+  selectedBomPartNumber = selectedPartNumber;
+}
+
+function revisionWorkflowRecord(part, status, approval, mrTitle) {
+  return {
+    type: "revision",
+    status,
+    approval,
+    mr_title: mrTitle,
+    updated_at: part.updated_at
+  };
+}
+
+function maturityWorkflowRecord(part, status) {
+  return {
+    type: "maturity",
+    status,
+    approval: "mr",
+    mr_title: maturityWorkflowMrTitle(part, status),
+    updated_at: part.updated_at
+  };
 }
 
 function stampPartRevision(part, status) {
   const editor = currentEditorName();
   const today = new Date().toISOString().slice(0, 10);
-  part.lifecycle_state = status;
   part.release_status = status;
   part.updated_by = editor;
   part.owner = editor;
@@ -3269,11 +3998,11 @@ function stampPartRevision(part, status) {
   part.revision_properties = {
     ...(part.revision_properties || {}),
     release_status: status,
-    lifecycle_state: status,
     owner: part.owner,
     updated_by: part.updated_by,
     updated_at: part.updated_at
   };
+  delete part.revision_properties.lifecycle_state;
 }
 
 function firstBlockedWorkflowMessage(rule) {
@@ -3312,8 +4041,19 @@ async function copyPartDetails(part) {
 }
 
 navigationTree.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
+  const button = event.target.closest("[data-save-bom-add], [data-cancel-bom-add], [data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
   if (!button) {
+    return;
+  }
+
+  if (button.dataset.saveBomAdd !== undefined) {
+    addBomFromForm(activeBomAddParent || openedPartNumber);
+    return;
+  }
+
+  if (button.dataset.cancelBomAdd !== undefined) {
+    activeBomAddParent = "";
+    renderApp();
     return;
   }
 
@@ -3360,7 +4100,6 @@ navigationTree.addEventListener("click", (event) => {
 
   if (button.dataset.bomPartNumber) {
     selectedBomPartNumber = button.dataset.bomPartNumber;
-    selectedPartNumber = button.dataset.bomPartNumber;
     renderApp();
     return;
   }
@@ -3462,10 +4201,11 @@ partContextMenu.addEventListener("click", (event) => {
   }
   if (partContextMenu.dataset.menuMode === "bom") {
     const childIdentifier = partContextMenu.dataset.bomPartNumber;
-    const parentIdentifier = partContextMenu.dataset.bomParentNumber;
+    const parentIdentifier = partContextMenu.dataset.bomParentNumber || openedPartNumber;
     hidePartContextMenu();
     if (actionButton.dataset.contextAction === "bom-add") {
-      addBomFromForm(parentIdentifier);
+      activeBomAddParent = parentIdentifier;
+      renderApp();
       return;
     }
     if (actionButton.dataset.contextAction === "bom-delete" && childIdentifier) {
@@ -3503,32 +4243,57 @@ csvImportFile?.addEventListener("change", () => importPartsCsvFile(csvImportFile
 
 tableHead.addEventListener("click", (event) => {
   const sortButton = event.target.closest("[data-table-sort]");
-  if (!sortButton || activeNavMode !== "table") {
+  if (sortButton && activeNavMode === "table") {
+    const column = sortButton.dataset.tableSort;
+    activeTableSort = {
+      column,
+      direction: activeTableSort.column === column && activeTableSort.direction === "asc" ? "desc" : "asc"
+    };
+    renderApp();
     return;
   }
-  const column = sortButton.dataset.tableSort;
-  activeTableSort = {
-    column,
-    direction: activeTableSort.column === column && activeTableSort.direction === "asc" ? "desc" : "asc"
-  };
-  renderApp();
+  const historySortButton = event.target.closest("[data-history-sort]");
+  if (historySortButton && activeNavMode === "history") {
+    const column = historySortButton.dataset.historySort;
+    activeHistorySort = {
+      column,
+      direction: activeHistorySort.column === column && activeHistorySort.direction === "asc" ? "desc" : "asc"
+    };
+    renderApp();
+  }
 });
 
 tableHead.addEventListener("input", (event) => {
   const filterInput = event.target.closest("[data-table-filter]");
-  if (!filterInput || activeNavMode !== "table") {
+  if (filterInput && activeNavMode === "table") {
+    tableColumnFilters = {
+      ...tableColumnFilters,
+      [filterInput.dataset.tableFilter]: filterInput.value
+    };
+    const filterKey = filterInput.dataset.tableFilter;
+    const cursor = filterInput.selectionStart ?? filterInput.value.length;
+    renderSearchWorkspace();
+    enableColumnResizing();
+    syncChrome();
+    const nextInput = tableHead.querySelector(`[data-table-filter="${CSS.escape(filterKey)}"]`);
+    nextInput?.focus();
+    nextInput?.setSelectionRange(cursor, cursor);
     return;
   }
-  tableColumnFilters = {
-    ...tableColumnFilters,
-    [filterInput.dataset.tableFilter]: filterInput.value
+  const historyFilterInput = event.target.closest("[data-history-filter]");
+  if (!historyFilterInput || activeNavMode !== "history") {
+    return;
+  }
+  historyColumnFilters = {
+    ...historyColumnFilters,
+    [historyFilterInput.dataset.historyFilter]: historyFilterInput.value
   };
-  const filterKey = filterInput.dataset.tableFilter;
-  const cursor = filterInput.selectionStart ?? filterInput.value.length;
+  const filterKey = historyFilterInput.dataset.historyFilter;
+  const cursor = historyFilterInput.selectionStart ?? historyFilterInput.value.length;
   renderSearchWorkspace();
   enableColumnResizing();
   syncChrome();
-  const nextInput = tableHead.querySelector(`[data-table-filter="${CSS.escape(filterKey)}"]`);
+  const nextInput = tableHead.querySelector(`[data-history-filter="${CSS.escape(filterKey)}"]`);
   nextInput?.focus();
   nextInput?.setSelectionRange(cursor, cursor);
 });
@@ -3583,7 +4348,10 @@ partsList.addEventListener("click", (event) => {
 
   const projectButton = event.target.closest("[data-submit-project]");
   if (projectButton) {
-    createProjectFromForm();
+    createProjectFromForm().catch((error) => {
+      statusMessage = `Project create failed: ${error.message}`;
+      renderApp();
+    });
     return;
   }
 
@@ -3614,6 +4382,18 @@ partsList.addEventListener("click", (event) => {
   const saveSettingsButton = event.target.closest("[data-save-settings]");
   if (saveSettingsButton) {
     saveSettingsFromForm();
+    return;
+  }
+
+  const connectGitHubButton = event.target.closest("[data-connect-github]");
+  if (connectGitHubButton) {
+    connectGitHub();
+    return;
+  }
+
+  const refreshGitHubAuthButton = event.target.closest("[data-refresh-github-auth]");
+  if (refreshGitHubAuthButton) {
+    refreshGitHubAuthStatus();
     return;
   }
 
@@ -3889,7 +4669,7 @@ function runAction(action) {
 function createPartFromForm() {
   const createMode = document.querySelector("[data-submit-create]")?.dataset.submitCreate || activeCreateMode;
   const values = {
-    partNumber: document.querySelector("#newPartNumber")?.value.trim(),
+    partNumber: canonicalPartNumber(document.querySelector("#newPartNumber")?.value.trim()),
     name: document.querySelector("#newPartName")?.value.trim(),
     project: document.querySelector("#newPartProject")?.value.trim(),
     revision: document.querySelector("#newPartRevision")?.value.trim() || "A",
@@ -3919,7 +4699,7 @@ function createPartFromForm() {
       };
       persistLocalChanges();
     }
-    statusMessage = `${preflight} Created draft ${values.partNumber}^${values.revision}; remote draft push requires the local Git bridge.`;
+    statusMessage = `${preflight} Created draft ${values.partNumber}^${values.revision}; open and save the draft to push through the local runner.`;
     renderProjectOptions();
     moveToPart(`${values.partNumber}^${values.revision}`);
   }
@@ -3934,14 +4714,20 @@ function generatePartNumberIntoForm() {
 }
 
 function validateDraftCreate(values, { fromSource }) {
-  if (!projects().includes(values.project)) {
-    return "Project must exist before creating a part";
+  if (values.project && !projects().includes(values.project)) {
+    return "Project must exist before assigning it to a part";
   }
   if (!values.partNumber) {
     return "Part number is required";
   }
-  if (parts.some((part) => part.part_number === values.partNumber)) {
+  if (parts.some((part) => canonicalPartNumber(part.part_number) === canonicalPartNumber(values.partNumber))) {
     return `${values.partNumber} is already in use`;
+  }
+  if (values.project) {
+    const projectNumberError = validatePartNumberForProject(values.partNumber, values.project);
+    if (projectNumberError) {
+      return projectNumberError;
+    }
   }
   if (!values.name) {
     return "Part name is required";
@@ -3966,9 +4752,9 @@ function createRevisionFromForm() {
     renderApp();
     return;
   }
-  const existingDraft = draftRevisionsForPart(partNumber)[0];
-  if (existingDraft) {
-    statusMessage = `Cannot create a new draft revision for ${partNumber}; ${partObjectLabel(existingDraft)} is already draft.`;
+  const existingUnreleased = unreleasedRevisionsForPart(partNumber)[0];
+  if (existingUnreleased) {
+    statusMessage = `Cannot create a new draft revision for ${partNumber}; ${partObjectLabel(existingUnreleased)} is already ${releaseStatusLabel(existingUnreleased)}.`;
     renderApp();
     return;
   }
@@ -3980,16 +4766,17 @@ function createRevisionFromForm() {
   const preflight = draftRemotePreflight();
   const created = createRevisionRecord(source, revision);
   if (created) {
-    statusMessage = `${preflight} Created draft ${partNumber}^${revision}; remote draft push requires the local Git bridge.`;
+    statusMessage = `${preflight} Created draft ${partNumber}^${revision}; open and save the draft to push through the local runner.`;
     moveToPart(`${partNumber}^${revision}`);
   }
 }
 
-function createProjectFromForm() {
+async function createProjectFromForm() {
   const name = document.querySelector("#newProjectName")?.value.trim();
   const key = document.querySelector("#newProjectKey")?.value.trim();
   const owner = document.querySelector("#newProjectOwner")?.value.trim();
   const description = document.querySelector("#newProjectDescription")?.value.trim();
+  const allowCustomPartNumbers = document.querySelector("#newProjectCustomNumbers")?.checked === true;
   const approvers = (document.querySelector("#newProjectApprovers")?.value || "")
     .split(",")
     .map((value) => value.trim())
@@ -4013,12 +4800,13 @@ function createProjectFromForm() {
     renderApp();
     return;
   }
-  customProjects.push({ name, key, owner, description, approvers });
-  persistLocalChanges();
+  customProjects.push({ name, key, owner, description, approvers, allow_custom_part_numbers: allowCustomPartNumbers });
+  await persistLocalChanges();
   renderProjectOptions();
   activeCreateMode = "hub";
-  statusMessage = `Created project ${name}`;
+  statusMessage = `Created project ${name}; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
   renderApp();
+  await pushProjectsToRunner(`Create project ${name}`, name);
 }
 
 function savePartFromRow(originalPartNumber) {
@@ -4041,7 +4829,6 @@ function savePartFromRow(originalPartNumber) {
   const oldPartNumber = part.part_number;
   part.part_number = values.part_number;
   part.name = values.name;
-  part.lifecycle_state = values.lifecycle_state || part.lifecycle_state;
   part.description = values.description;
   part.updated_at = new Date().toISOString().slice(0, 10);
   parts.forEach((candidate) => {
@@ -4052,8 +4839,9 @@ function savePartFromRow(originalPartNumber) {
     });
   });
   part.object_id = `${part.part_number}^${part.revision || "V1"}`;
+  appendPartActivity(part, "updated_properties", `Updated properties for ${partObjectLabel(part)}`);
   selectedPartNumber = partKey(part);
-  parts.sort((a, b) => partKey(a).localeCompare(partKey(b)));
+  parts = sortParts(parts);
   persistLocalChanges();
   statusMessage = `Saved ${part.part_number}`;
   renderApp();
@@ -4062,23 +4850,33 @@ function savePartFromRow(originalPartNumber) {
 function saveProjectFromRow(originalProject) {
   const fields = document.querySelectorAll(`[data-edit-project="${CSS.escape(originalProject)}"]`);
   const values = Object.fromEntries([...fields].map((field) => [field.dataset.field, field.value.trim()]));
-  saveProjectValues(originalProject, values);
+  saveProjectValues(originalProject, values).catch((error) => {
+    statusMessage = `Project save failed: ${error.message}`;
+    renderApp();
+  });
 }
 
 function saveSelectedProjectFromDetail(originalProject) {
   const fields = document.querySelectorAll("[data-selected-project-field]");
-  const values = Object.fromEntries([...fields].map((field) => [field.dataset.selectedProjectField, field.value.trim()]));
+  const values = Object.fromEntries([...fields].map((field) => [
+    field.dataset.selectedProjectField,
+    field.type === "checkbox" ? field.checked : field.value.trim()
+  ]));
   activeProjectEditMode = false;
-  saveProjectValues(originalProject, values);
+  saveProjectValues(originalProject, values).catch((error) => {
+    statusMessage = `Project save failed: ${error.message}`;
+    renderApp();
+  });
 }
 
-function saveProjectValues(originalProject, values) {
+async function saveProjectValues(originalProject, values) {
   const existing = customProjects.find((project) => project.name === originalProject);
   if (existing) {
     existing.key = values.key || existing.key || projectKey(originalProject);
     existing.owner = values.owner || "engineering@example.com";
     existing.description = values.description || "";
     existing.drive_url = values.drive_url || "";
+    existing.allow_custom_part_numbers = values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true";
     existing.approvers = (values.approvers || "").split(",").map((value) => value.trim()).filter(Boolean);
   } else {
     customProjects.push({
@@ -4087,13 +4885,15 @@ function saveProjectValues(originalProject, values) {
       owner: values.owner || "engineering@example.com",
       description: values.description || "",
       drive_url: values.drive_url || "",
+      allow_custom_part_numbers: values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true",
       approvers: (values.approvers || "").split(",").map((value) => value.trim()).filter(Boolean)
     });
   }
-  persistLocalChanges();
+  await persistLocalChanges();
   renderProjectOptions();
-  statusMessage = `Saved project ${originalProject}`;
+  statusMessage = `Saved project ${originalProject}; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
   renderApp();
+  await pushProjectsToRunner(`Update project ${originalProject}`, originalProject);
 }
 
 async function handleSaveOpenPart(originalPartNumber) {
@@ -4101,6 +4901,15 @@ async function handleSaveOpenPart(originalPartNumber) {
     await saveOpenPartFromForm(originalPartNumber);
   } catch (error) {
     statusMessage = `Save failed: ${error.message}`;
+    renderApp();
+  }
+}
+
+async function handleSaveAttachments(originalPartNumber) {
+  try {
+    await saveAttachmentsFromForm(originalPartNumber);
+  } catch (error) {
+    statusMessage = `Attachment save failed: ${error.message}`;
     renderApp();
   }
 }
@@ -4120,7 +4929,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
   const values = Object.fromEntries([...fields].map((field) => [field.dataset.openPartField, field.value.trim()]));
   values.name ??= part.name || "";
   values.description ??= part.description || "";
-  values.traceability ??= part.traceability || "";
+  values.legacy_part_number ??= legacyPartNumberValue(part);
+  values.traceability ??= traceabilityValue(part) || "LOT";
   values.maturity = part.maturity || maturityStageValue(part);
   values.driveUrl ??= documentUrl(part, "drive");
   values.onshapeUrl ??= documentUrl(part, "onshape");
@@ -4147,7 +4957,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
   siblingParts.forEach((sibling) => {
     sibling.name = values.name;
     sibling.description = values.description || "";
-    sibling.traceability = values.traceability || "";
+    sibling.legacy_part_number = values.legacy_part_number || "";
+    sibling.traceability = normalizeTraceability(values.traceability) || "LOT";
     sibling.maturity = values.maturity || sibling.maturity || "development";
     sibling.file_links = stableFileLinks;
     sibling.onshape = stableOnshape;
@@ -4158,41 +4969,29 @@ async function saveOpenPartFromForm(originalPartNumber) {
       part_number: sibling.part_number,
       name: sibling.name,
       description: sibling.description,
-      category: sibling.category || "general",
+      legacy_part_number: sibling.legacy_part_number,
       project: sibling.project,
-      traceability: sibling.traceability,
+      traceability: traceabilityValue(sibling),
       maturity: sibling.maturity,
       onshape: sibling.onshape,
       work_instructions: sibling.work_instructions,
       file_links: sibling.file_links,
       tags: sibling.tags || [],
-      manufacturers: sibling.manufacturers || [],
       revisions: siblingParts.map((revisionPart) => `${sibling.part_number}^${revisionPart.revision || "A"}.json`)
     };
   });
   const approvers = values.approvers
     ? values.approvers.split(",").map((name) => ({ name: name.trim() })).filter((approver) => approver.name)
     : [];
-  const newAttachments = attachmentRowsFromForm();
-  if (newAttachments === null) {
-    renderApp();
-    return;
-  }
-  const removedAttachmentKeys = attachmentRemovalKeysFromForm();
-  part.lifecycle_state = revisionStatusValue(part);
-  part.release_status = part.lifecycle_state;
+  part.release_status = revisionStatusValue(part);
   part.owner = editor;
   part.updated_by = editor;
   part.change_summary = values.change_summary || "";
   part.updated_at = today;
   part.approvers = approvers;
-  if (removedAttachmentKeys.length) {
-    part.attachments = removeAttachmentRecords(part.attachments, removedAttachmentKeys);
-    part.documents = removeAttachmentRecords(part.documents, removedAttachmentKeys);
-  }
-  if (newAttachments.length) {
-    part.attachments = [...asArray(part.attachments), ...newAttachments];
-  }
+  appendPartActivity(part, "updated_properties", values.change_summary || `Updated properties for ${partObjectLabel(part)}`, {
+    actor: editor
+  });
   part.revision_properties = {
     ...(part.revision_properties || {}),
     schema: "peak.revision.v1",
@@ -4200,7 +4999,6 @@ async function saveOpenPartFromForm(originalPartNumber) {
     part_number: part.part_number,
     revision: part.revision || "A",
     release_status: part.release_status,
-    lifecycle_state: part.lifecycle_state,
     owner: part.owner,
     created_by: part.created_by || part.owner,
     created_at: part.created_at,
@@ -4210,6 +5008,7 @@ async function saveOpenPartFromForm(originalPartNumber) {
     approvers: part.approvers,
     bom: part.bom || [],
     attachments: part.attachments || [],
+    activity_history: part.activity_history || [],
     change_summary: part.change_summary
   };
   siblingParts.forEach((sibling) => {
@@ -4219,13 +5018,71 @@ async function saveOpenPartFromForm(originalPartNumber) {
   selectedBomPartNumber = partKey(part);
   openedPartNumber = partKey(part);
   activePartEditMode = false;
+  activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
   statusMessage = `Saved ${partObjectLabel(part)} locally; pushing draft edit to ${productDataGithubOwner}/${productDataGithubRepo}.`;
   window.history.replaceState({}, "", partUrl(partKey(part)));
   renderProjectOptions();
   renderApp();
   await persistLocalChanges();
-  await pushDraftPartChangesToGithub(part);
+  await pushDraftPartChangesToRunner(part);
+}
+
+async function saveAttachmentsFromForm(originalPartNumber) {
+  const part = findPartByKey(originalPartNumber);
+  if (!part) {
+    return;
+  }
+  const newAttachments = attachmentRowsFromForm();
+  if (newAttachments === null) {
+    renderApp();
+    return;
+  }
+  const removedAttachmentKeys = attachmentRemovalKeysFromForm();
+  const editor = currentEditorName();
+  const today = new Date().toISOString().slice(0, 10);
+  if (removedAttachmentKeys.length) {
+    part.attachments = removeAttachmentRecords(part.attachments, removedAttachmentKeys);
+    part.documents = removeAttachmentRecords(part.documents, removedAttachmentKeys);
+  }
+  if (newAttachments.length) {
+    part.attachments = [...asArray(part.attachments), ...newAttachments];
+  }
+  part.owner = editor;
+  part.updated_by = editor;
+  part.updated_at = today;
+  appendPartActivity(part, "updated_attachments", `Updated attachments for ${partObjectLabel(part)}`, {
+    actor: editor
+  });
+  part.revision_properties = {
+    ...(part.revision_properties || {}),
+    schema: "peak.revision.v1",
+    object_id: partKey(part),
+    part_number: part.part_number,
+    revision: part.revision || "A",
+    release_status: revisionStatusValue(part),
+    owner: part.owner,
+    created_by: part.created_by || part.owner,
+    created_at: part.created_at,
+    updated_by: part.updated_by,
+    updated_at: part.updated_at,
+    based_on: part.based_on || null,
+    approvers: part.approvers || [],
+    bom: part.bom || [],
+    attachments: part.attachments || [],
+    activity_history: part.activity_history || [],
+    change_summary: part.change_summary || "",
+    workflow: part.workflow || part.revision_properties?.workflow || null
+  };
+  selectedPartNumber = partKey(part);
+  selectedBomPartNumber = partKey(part);
+  openedPartNumber = partKey(part);
+  activeAttachmentEditMode = false;
+  activeAttachmentDraftCount = 0;
+  statusMessage = `Saved attachments for ${partObjectLabel(part)} locally; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  renderApp();
+  await persistLocalChanges();
+  await pushDraftPartChangesToRunner(part, { commitMessage: `Update attachments ${partObjectLabel(part)}` });
 }
 
 function attachmentRowsFromForm() {
@@ -4266,14 +5123,20 @@ function removeAttachmentRecords(records, removalKeys) {
 function addBomFromForm(parentIdentifier = "") {
   const rootPart = getOpenedPart();
   const parentPart = parentIdentifier ? findPartByKey(parentIdentifier) : rootPart;
-  const childObjectId = prompt("Part number or Part ID to add");
+  const row = document.querySelector("[data-bom-add-parent]");
+  const childObjectId = row?.querySelector('[data-bom-add-field="part"]')?.value.trim();
   const childPart = findPartByKey(childObjectId);
   if (!parentPart || !childPart) {
     statusMessage = "Select a valid part to add";
     renderApp();
     return;
   }
-  const quantity = Number(prompt("Quantity", "1") || 1);
+  if (partKey(parentPart) !== partKey(rootPart)) {
+    statusMessage = "Open the subassembly to edit its BOM";
+    renderApp();
+    return;
+  }
+  const quantity = Number(row?.querySelector('[data-bom-add-field="quantity"]')?.value || 1);
   parentPart.bom = parentPart.bom || [];
   if (parentPart.bom.some((item) => (resolveBomChild(item) ? partKey(resolveBomChild(item)) === partKey(childPart) : item.child_object_id === partKey(childPart)))) {
     statusMessage = `${partObjectLabel(childPart)} is already in this BOM`;
@@ -4288,6 +5151,7 @@ function addBomFromForm(parentIdentifier = "") {
     unit: "each"
   });
   parentPart.updated_at = new Date().toISOString().slice(0, 10);
+  activeBomAddParent = "";
   persistLocalChanges();
   statusMessage = `Added ${partObjectLabel(childPart)} to ${partObjectLabel(parentPart)}`;
   renderApp();
@@ -4386,7 +5250,8 @@ function clearBomDragState() {
 
 function showSyncAction(action) {
   if (action === "pull") {
-    statusMessage = `Pull requires a local Git bridge: git pull origin ${productDataGithubBranch}`;
+    pullMainFromRunner();
+    return;
   } else if (action === "import-csv") {
     importCsvFromPicker();
     return;
@@ -4397,18 +5262,12 @@ function showSyncAction(action) {
     exportPartsJson();
     return;
   } else {
-    statusMessage = "Push requires a local Git bridge to create a branch, commit, push, open an MR, and assign approvers.";
+    statusMessage = "Merge request push requires runner support to create a branch, commit, push, open an MR, and assign approvers.";
   }
   renderApp();
 }
 
 function saveSettingsFromForm() {
-  const token = document.querySelector("#settingsGithubToken")?.value.trim() || "";
-  if (token) {
-    localStorage.setItem("peakGithubToken", token);
-  } else {
-    localStorage.removeItem("peakGithubToken");
-  }
   statusMessage = productDataDirectoryHandle
     ? `Using product data folder ${productDataFolderName}; remote ${productDataGithubOwner}/${productDataGithubRepo}`
     : "Select a product data folder to load PEAK data";
@@ -4422,16 +5281,126 @@ function savePreferencesFromForm() {
   renderApp();
 }
 
+function ensureGitHubAuthStatus() {
+  if (githubAuthStatus || githubAuthChecking) {
+    return;
+  }
+  window.setTimeout(() => refreshGitHubAuthStatus({ render: true }), 0);
+}
+
+async function refreshGitHubAuthStatus({ render = true } = {}) {
+  githubAuthChecking = true;
+  try {
+    const response = await fetch(peakRunnerGitHubAuthStatusUrl, { cache: "no-store" });
+    githubAuthStatus = await response.json();
+    if (!response.ok || githubAuthStatus.ok === false) {
+      throw new Error(githubAuthStatus.message || "Could not check GitHub connection");
+    }
+  } catch (error) {
+    githubAuthStatus = {
+      ok: false,
+      authenticated: false,
+      installed: false,
+      message: "Could not check GitHub connection.",
+      action: runnerErrorMessage(error)
+    };
+  } finally {
+    githubAuthChecking = false;
+    if (render) {
+      renderApp();
+    }
+  }
+  return githubAuthStatus;
+}
+
+async function connectGitHub({ workflow, part } = {}) {
+  githubAuthChecking = true;
+  githubAuthStatus = {
+    ok: true,
+    authenticated: false,
+    installed: true,
+    message: "Opening PEAK GitHub Login...",
+    action: "A terminal window will open with the browser login instructions. PEAK will update when GitHub is connected."
+  };
+  if (workflow && part) {
+    setWorkflowFeedback(workflow, part, "running", "Opening PEAK GitHub Login...");
+  }
+  renderApp();
+  try {
+    const response = await fetch(peakRunnerGitHubAuthLoginUrl, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.action || payload.message || "Could not start GitHub login");
+    }
+    githubAuthStatus = payload;
+    statusMessage = payload.message || "GitHub login started";
+    if (workflow && part) {
+      setWorkflowFeedback(workflow, part, "running", `${payload.message || "GitHub login started"} ${payload.action || ""}`.trim());
+    }
+    startGitHubAuthPolling({ workflow, part });
+  } catch (error) {
+    githubAuthChecking = false;
+    githubAuthStatus = {
+      ok: false,
+      authenticated: false,
+      message: "GitHub connection failed.",
+      action: error.message
+    };
+    if (workflow && part) {
+      setWorkflowFeedback(workflow, part, "error", `GitHub connection failed: ${error.message}`);
+    }
+  }
+  renderApp();
+}
+
+function startGitHubAuthPolling({ workflow, part } = {}) {
+  if (githubAuthPollingTimer) {
+    window.clearInterval(githubAuthPollingTimer);
+  }
+  let attempts = 0;
+  githubAuthPollingTimer = window.setInterval(async () => {
+    attempts += 1;
+    const status = await refreshGitHubAuthStatus({ render: false });
+    if (status?.authenticated) {
+      window.clearInterval(githubAuthPollingTimer);
+      githubAuthPollingTimer = null;
+      githubAuthChecking = false;
+      statusMessage = status.message || "GitHub connected";
+      if (workflow && part) {
+        setWorkflowFeedback(workflow, part, "success", `${statusMessage}. Retry the workflow action to create the merge request.`);
+      }
+      renderApp();
+      return;
+    }
+    if (attempts >= 20) {
+      window.clearInterval(githubAuthPollingTimer);
+      githubAuthPollingTimer = null;
+      githubAuthChecking = false;
+      githubAuthStatus = {
+        ...(githubAuthStatus || {}),
+        authenticated: false,
+        message: "GitHub is not connected yet.",
+        action: "Finish the PEAK GitHub Login window, or click Connect GitHub to try again."
+      };
+      statusMessage = "GitHub is not connected yet. Finish the PEAK GitHub Login window, or try Connect GitHub again.";
+      if (workflow && part) {
+        setWorkflowFeedback(workflow, part, "error", statusMessage, { action: "connect-github" });
+      }
+      renderApp();
+    }
+  }, 3000);
+}
+
 function createPartRecord(values, options = {}) {
   const shouldRender = options.render !== false;
-  if (!values.partNumber || !values.name || !values.project || !values.revision || !values.state || !values.owner) {
+  if (!values.partNumber || !values.name || !values.revision || !values.state || !values.owner) {
     statusMessage = "Missing required create fields";
     if (shouldRender) {
       renderApp();
     }
     return false;
   }
-  if (parts.some((part) => part.part_number === values.partNumber)) {
+  if (parts.some((part) => canonicalPartNumber(part.part_number) === canonicalPartNumber(values.partNumber))) {
     statusMessage = `${values.partNumber} already exists`;
     if (shouldRender) {
       renderApp();
@@ -4466,15 +5435,14 @@ function createPartRecord(values, options = {}) {
     part_number: values.partNumber,
     name: values.name,
     description: values.description || "",
-    category: "general",
+    legacy_part_number: values.legacyPartNumber || values.legacy_part_number || "",
     project: values.project,
-    traceability: "Not set",
+    traceability: "LOT",
     maturity: "development",
     onshape: onshapeLinks,
     work_instructions: [],
     file_links: fileLinks,
     tags: [],
-    manufacturers: [],
     revisions: [`${values.partNumber}^${values.revision}.json`]
   };
   const revisionProperties = {
@@ -4483,7 +5451,6 @@ function createPartRecord(values, options = {}) {
     part_number: values.partNumber,
     revision: values.revision,
     release_status: values.state,
-    lifecycle_state: values.state,
     owner: values.owner,
     created_by: values.owner,
     created_at: today,
@@ -4502,9 +5469,8 @@ function createPartRecord(values, options = {}) {
     object_id: `${values.partNumber}^${values.revision}`,
     name: values.name,
     description: values.description || "",
-    category: "general",
+    legacy_part_number: values.legacyPartNumber || values.legacy_part_number || "",
     project: values.project,
-    lifecycle_state: values.state,
     revision: values.revision,
     owner: values.owner,
     tags: [],
@@ -4513,7 +5479,6 @@ function createPartRecord(values, options = {}) {
     file_links: fileLinks,
     documents: [],
     attachments: [],
-    manufacturers: [],
     approvers: [],
     bom: [],
     change_summary: values.changeSummary || "",
@@ -4523,12 +5488,16 @@ function createPartRecord(values, options = {}) {
     updated_by: values.owner,
     release_status: values.state,
     maturity: "development",
-    traceability: "Not set",
+    traceability: "LOT",
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
+  appendPartActivity(part, "create", `Created ${partObjectLabel(part)}`, {
+    actor: values.owner,
+    performedAt: `${today}T00:00:00.000Z`
+  });
   parts.push(part);
-  parts.sort((a, b) => partKey(a).localeCompare(partKey(b)));
+  parts = sortParts(parts);
   selectedPartNumber = partKey(part);
   persistLocalChanges();
   renderProjectOptions();
@@ -4543,9 +5512,9 @@ function createRevisionRecord(source, revision) {
   if (!source || !revision) {
     return false;
   }
-  const existingDraft = draftRevisionsForPart(source.part_number)[0];
-  if (existingDraft) {
-    statusMessage = `Cannot create a new draft revision for ${source.part_number}; ${partObjectLabel(existingDraft)} is already draft.`;
+  const existingUnreleased = unreleasedRevisionsForPart(source.part_number)[0];
+  if (existingUnreleased) {
+    statusMessage = `Cannot create a new draft revision for ${source.part_number}; ${partObjectLabel(existingUnreleased)} is already ${releaseStatusLabel(existingUnreleased)}.`;
     return false;
   }
   const today = new Date().toISOString().slice(0, 10);
@@ -4556,7 +5525,6 @@ function createRevisionRecord(source, revision) {
     part_number: source.part_number,
     revision,
     release_status: "draft",
-    lifecycle_state: "draft",
     owner,
     created_by: owner,
     created_at: today,
@@ -4574,15 +5542,14 @@ function createRevisionRecord(source, revision) {
     part_number: source.part_number,
     name: source.name,
     description: source.description || "",
-    category: source.category || "general",
+    legacy_part_number: legacyPartNumberValue(source),
     project: source.project,
-    traceability: source.traceability || "Not set",
+    traceability: traceabilityValue(source) || "LOT",
     maturity: source.maturity || "development",
     onshape: source.onshape || [],
     work_instructions: source.work_instructions || [],
     file_links: source.file_links || [],
     tags: source.tags || [],
-    manufacturers: source.manufacturers || [],
     revisions: nextRevisionList(source.part_number, revision)
   };
   const part = {
@@ -4593,18 +5560,16 @@ function createRevisionRecord(source, revision) {
     revision,
     name: source.name,
     description: source.description || "",
-    category: source.category || "general",
+    legacy_part_number: legacyPartNumberValue(source),
     project: source.project,
-    traceability: source.traceability || "Not set",
+    traceability: traceabilityValue(source) || "LOT",
     maturity: source.maturity || "development",
-    lifecycle_state: "draft",
     release_status: "draft",
     owner,
     onshape: source.onshape || [],
     work_instructions: source.work_instructions || [],
     file_links: source.file_links || [],
     tags: source.tags || [],
-    manufacturers: source.manufacturers || [],
     approvers: [],
     bom: revisionProperties.bom,
     documents: [],
@@ -4618,6 +5583,10 @@ function createRevisionRecord(source, revision) {
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
+  appendPartActivity(part, "created_revision", `Created revision ${partObjectLabel(part)} from ${partObjectLabel(source)}`, {
+    actor: owner,
+    performedAt: `${today}T00:00:00.000Z`
+  });
   parts.push(part);
   parts
     .filter((candidate) => candidate.part_number === source.part_number)
@@ -4627,7 +5596,7 @@ function createRevisionRecord(source, revision) {
         revisions: partProperties.revisions
       };
     });
-  parts.sort((a, b) => partKey(a).localeCompare(partKey(b)));
+  parts = sortParts(parts);
   selectedPartNumber = partKey(part);
   persistLocalChanges();
   return true;
@@ -4697,7 +5666,8 @@ async function importPartsCsvFile(file) {
   try {
     const rows = parseCsv(await file.text());
     const result = importPartsCsvRows(rows);
-    statusMessage = `Imported ${result.created} parts${result.skipped ? `, skipped ${result.skipped}` : ""}`;
+    const skippedDetails = result.skippedReasons?.length ? `: ${result.skippedReasons.slice(0, 3).join("; ")}${result.skippedReasons.length > 3 ? "; ..." : ""}` : "";
+    statusMessage = `Imported ${result.created} parts${result.skipped ? `, skipped ${result.skipped}${skippedDetails}` : ""}`;
   } catch (error) {
     statusMessage = error.message;
   } finally {
@@ -4724,14 +5694,33 @@ function importPartsCsvRows(rows) {
   const owner = localStorage.getItem("peakDefaultOwner") || "engineering@example.com";
   let created = 0;
   let skipped = 0;
+  const skippedReasons = [];
   rows.slice(1).forEach((row) => {
-    const partNumber = row[partNumberIndex]?.trim();
+    const rawPartNumber = row[partNumberIndex]?.trim();
+    const partNumber = canonicalPartNumber(rawPartNumber);
     const name = row[nameIndex]?.trim();
     const project = row[projectIndex]?.trim();
-    if (!partNumber && !name && !project) {
+    if (!rawPartNumber && !name && !project) {
       return;
     }
-    if (!partNumber || !name || !project || parts.some((part) => part.part_number === partNumber)) {
+    if (!partNumber || !name || !project) {
+      skippedReasons.push(`${rawPartNumber || "Blank part number"}: missing Part No, Name, or Project`);
+      skipped += 1;
+      return;
+    }
+    if (!projects().includes(project)) {
+      skippedReasons.push(`${rawPartNumber}: project "${project}" does not exist`);
+      skipped += 1;
+      return;
+    }
+    const projectNumberError = validatePartNumberForProject(partNumber, project);
+    if (projectNumberError) {
+      skippedReasons.push(`${rawPartNumber}: ${projectNumberError}`);
+      skipped += 1;
+      return;
+    }
+    if (parts.some((part) => canonicalPartNumber(part.part_number) === canonicalPartNumber(partNumber))) {
+      skippedReasons.push(`${rawPartNumber}: part number already exists`);
       skipped += 1;
       return;
     }
@@ -4752,8 +5741,24 @@ function importPartsCsvRows(rows) {
     created += wasCreated ? 1 : 0;
     skipped += wasCreated ? 0 : 1;
   });
-  parts.sort((a, b) => partKey(a).localeCompare(partKey(b)));
-  return { created, skipped };
+  parts = sortParts(parts);
+  return { created, skipped, skippedReasons };
+}
+
+function validatePartNumberForProject(partNumber, project) {
+  if (!project) {
+    return "";
+  }
+  const key = projectKey(project);
+  const format = projectAllowsCustomPartNumbers(project)
+    ? new RegExp(`^${escapeRegExp(key)}-.+`, "i")
+    : new RegExp(`^${escapeRegExp(key)}-\\d+$`, "i");
+  if (format.test(partNumber)) {
+    return "";
+  }
+  return projectAllowsCustomPartNumbers(project)
+    ? `Custom part numbers for ${project} must start with ${key}-`
+    : `Part numbers for ${project} must use the ${key}-# format`;
 }
 
 function findCsvColumn(headers, candidates) {
@@ -4993,8 +5998,8 @@ async function writeProductDataSnapshot(directoryHandle) {
   );
 }
 
-function productDataSnapshotFiles() {
-  const groups = groupedPartResults(parts);
+function productDataSnapshotFiles(records = parts) {
+  const groups = groupedPartResults(records);
   const today = new Date().toISOString().slice(0, 10);
   const files = [];
   const manifest = {
@@ -5021,107 +6026,164 @@ function productDataSnapshotFiles() {
   return files;
 }
 
-async function pushDraftPartChangesToGithub(part) {
-  const token = localStorage.getItem("peakGithubToken") || "";
-  const label = partObjectLabel(part);
-  if (!token) {
-    statusMessage = `Saved ${label} locally. Add a GitHub token in Settings > Setup to push to ${productDataGithubOwner}/${productDataGithubRepo}.`;
-    renderApp();
-    return;
-  }
+function productDataDeletePathsForRevision(part) {
+  const revisionPath = `parts/${part.part_number}/${part.part_number}^${part.revision || "A"}.json`;
+  const hasOtherRevisions = parts.some((candidate) => candidate.part_number === part.part_number && partKey(candidate) !== partKey(part));
+  return hasOtherRevisions
+    ? [revisionPath]
+    : [revisionPath, `parts/${part.part_number}/${part.part_number}.json`];
+}
 
+async function pushDraftPartChangesToRunner(part, { commitMessage = "" } = {}) {
+  const label = partObjectLabel(part);
   try {
-    const files = productDataSnapshotFilesForPart(part);
-    const message = `Update draft ${label}`;
-    await commitGithubJsonFiles(files, message, token);
+    const response = await fetch(peakRunnerPushUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        partLabel: label,
+        partNumber: part.part_number,
+        revision: part.revision || "A",
+        commitMessage,
+        files: productDataSnapshotFiles()
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "PEAK runner push failed");
+    }
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
-    statusMessage = `Saved ${label} and pushed product data to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+    statusMessage = payload.message || `Saved ${label} and pushed product data to ${productDataGithubOwner}/${productDataGithubRepo}.`;
   } catch (error) {
     hasRepoChanges = true;
     localStorage.setItem("peakHasLocalChanges", "true");
-    statusMessage = `Saved ${label} locally, but GitHub push failed: ${error.message}`;
+    statusMessage = `Saved ${label} locally, but runner push failed: ${runnerErrorMessage(error)}`;
   }
   renderApp();
 }
 
-function productDataSnapshotFilesForPart(part) {
-  const revisions = parts.filter((candidate) => candidate.part_number === part.part_number);
-  return [
-    {
-      path: `parts/${part.part_number}/${part.part_number}.json`,
-      value: productPartProperties(part.part_number, revisions)
-    },
-    {
-      path: `parts/${part.part_number}/${part.part_number}^${part.revision || "A"}.json`,
-      value: productRevisionProperties(part)
-    },
-    {
-      path: "manifest.json",
-      value: productDataSnapshotFiles().find((file) => file.path === "manifest.json")?.value
-    }
-  ].filter((file) => file.value);
-}
-
-async function commitGithubJsonFiles(files, message, token) {
-  const ref = await githubJson(`${productDataGithubRepoApi}/git/ref/heads/${encodeURIComponent(productDataGithubBranch)}`, token);
-  const baseCommit = await githubJson(ref.object.url, token);
-  const tree = await githubJson(`${productDataGithubRepoApi}/git/trees`, token, {
-    method: "POST",
-    body: {
-      base_tree: baseCommit.tree.sha,
-      tree: files.map((file) => ({
-        path: normalizeProductPath(file.path),
-        mode: "100644",
-        type: "blob",
-        content: `${JSON.stringify(file.value, null, 2)}\n`
-      }))
-    }
-  });
-  const commit = await githubJson(`${productDataGithubRepoApi}/git/commits`, token, {
-    method: "POST",
-    body: {
-      message,
-      tree: tree.sha,
-      parents: [baseCommit.sha]
-    }
-  });
-  await githubJson(`${productDataGithubRepoApi}/git/refs/heads/${encodeURIComponent(productDataGithubBranch)}`, token, {
-    method: "PATCH",
-    body: {
-      sha: commit.sha
-    }
-  });
-}
-
-async function githubJson(url, token, options = {}) {
-  const response = await fetch(url, {
-    method: options.method || "GET",
-    headers: githubHeaders(token),
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
-  if (!response.ok) {
-    throw new Error(await githubErrorMessage(response, "GitHub request failed"));
-  }
-  return response.json();
-}
-
-function githubHeaders(token) {
-  return {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-    "X-GitHub-Api-Version": "2022-11-28"
-  };
-}
-
-async function githubErrorMessage(response, fallback) {
+async function pushProjectsToRunner(commitMessage, projectName = "projects") {
+  const label = `projects ${projectName}`.trim();
   try {
-    const payload = await response.json();
-    return payload.message ? `${fallback}: ${payload.message}` : fallback;
-  } catch {
-    return fallback;
+    const response = await fetch(peakRunnerPushUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        partLabel: label,
+        commitMessage,
+        files: productDataSnapshotFiles()
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "PEAK runner project push failed");
+    }
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    statusMessage = payload.message || `Pushed project changes to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  } catch (error) {
+    hasRepoChanges = true;
+    localStorage.setItem("peakHasLocalChanges", "true");
+    statusMessage = `Saved project changes locally, but runner push failed: ${runnerErrorMessage(error)}`;
   }
+  renderApp();
+}
+
+async function pushTabularChangesToRunner() {
+  statusMessage = `Pushing tabular changes to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  renderApp();
+  try {
+    const response = await fetch(peakRunnerPushUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        partLabel: "tabular data",
+        commitMessage: "Update tabular product data",
+        files: productDataSnapshotFiles()
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "PEAK runner table push failed");
+    }
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    statusMessage = payload.message || `Pushed tabular changes to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  } catch (error) {
+    hasRepoChanges = true;
+    localStorage.setItem("peakHasLocalChanges", "true");
+    statusMessage = `Saved tabular changes locally, but runner push failed: ${runnerErrorMessage(error)}`;
+  }
+  renderApp();
+}
+
+async function pushWorkflowTransitionToRunner({ workflow, mode, title, label, target, part, files = productDataSnapshotFiles(), deletePaths = [] }) {
+  try {
+    const response = await fetch(peakRunnerWorkflowUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflow,
+        mode,
+        title,
+        label,
+        target,
+        partNumber: part.part_number,
+        revision: part.revision || "A",
+        files,
+        deletePaths
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "PEAK workflow runner failed");
+    }
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    statusMessage = workflowRunnerSuccessMessage(payload, title);
+    setWorkflowFeedback(workflow, part, "success", workflowRunnerInlineSuccessMessage(payload, mode, title));
+  } catch (error) {
+    const directMode = mode === "direct";
+    hasRepoChanges = directMode;
+    localStorage.setItem("peakHasLocalChanges", directMode ? "true" : "false");
+    statusMessage = directMode
+      ? `${label} saved locally, but workflow GitHub action failed: ${runnerErrorMessage(error)}`
+      : `${label} was not changed locally because the merge request failed: ${runnerErrorMessage(error)}`;
+    const feedbackMessage = directMode
+      ? `Push failed: ${runnerErrorMessage(error)}`
+      : `Merge request failed: ${runnerErrorMessage(error)}`;
+    setWorkflowFeedback(workflow, part, "error", feedbackMessage, isGitHubAuthError(error) ? { action: "connect-github" } : {});
+  }
+  renderApp();
+}
+
+function workflowRunnerSuccessMessage(payload, title) {
+  if (payload.prUrl) {
+    return `Created GitHub merge request "${title}": ${payload.prUrl}`;
+  }
+  return payload.message || `Workflow transition "${title}" pushed to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+}
+
+function workflowRunnerInlineSuccessMessage(payload, mode, title) {
+  if (payload.prUrl) {
+    return `Merge request created: ${payload.prUrl}`;
+  }
+  if (mode === "direct") {
+    return `Push successful: ${payload.message || title}`;
+  }
+  return payload.message || `Workflow action completed: ${title}`;
+}
+
+function runnerErrorMessage(error) {
+  if (error instanceof TypeError) {
+    return "start PEAK with npm start so the local runner can use Git credentials.";
+  }
+  return error.message || "unknown runner error";
+}
+
+function isGitHubAuthError(error) {
+  return /connect github|github cli|gh auth|not authenticated|login/i.test(error?.message || "");
 }
 
 function productProjectsPayload() {
@@ -5134,7 +6196,8 @@ function productProjectsPayload() {
       owner: projectOwner(name),
       approvers: projectApprovers(name),
       description: projectDescription(name),
-      drive_url: projectDriveUrl(name)
+      drive_url: projectDriveUrl(name),
+      allow_custom_part_numbers: projectAllowsCustomPartNumbers(name)
     }))
   };
 }
@@ -5147,18 +6210,23 @@ function productPartProperties(partNumber, revisions) {
     part_number: partNumber,
     name: representative.name,
     description: representative.description || "",
-    category: representative.category || "general",
+    legacy_part_number: legacyPartNumberValue(representative) || undefined,
     project: representative.project,
-    traceability: representative.traceability || "Not set",
+    traceability: traceabilityValue(representative) || "LOT",
     maturity: representative.maturity || "development",
     onshape: representative.onshape || [],
     work_instructions: representative.work_instructions || [],
     file_links: representative.file_links || [],
     tags: representative.tags || [],
-    manufacturers: representative.manufacturers || [],
     workflow: representative.part_properties?.workflow || representative.workflow || null,
     revisions: revisions.map((part) => `${partNumber}^${part.revision || "A"}.json`).sort()
   };
+  delete properties.category;
+  delete properties.manufacturers;
+  delete properties.lifecycle_state;
+  if (!properties.legacy_part_number) {
+    delete properties.legacy_part_number;
+  }
   return removeUndefinedFields(properties);
 }
 
@@ -5170,7 +6238,6 @@ function productRevisionProperties(part) {
     part_number: part.part_number,
     revision: part.revision || "A",
     release_status: part.release_status || part.lifecycle_state || "draft",
-    lifecycle_state: part.lifecycle_state || part.release_status || "draft",
     owner: part.owner,
     created_by: part.created_by || part.owner,
     created_at: part.created_at,
@@ -5180,9 +6247,13 @@ function productRevisionProperties(part) {
     approvers: part.approvers || [],
     bom: part.bom || [],
     attachments: part.attachments || part.documents || [],
+    activity_history: activityHistoryForPart(part),
     workflow: part.revision_properties?.workflow || part.workflow || null,
     change_summary: part.change_summary || ""
   };
+  delete properties.category;
+  delete properties.manufacturers;
+  delete properties.lifecycle_state;
   return removeUndefinedFields(properties);
 }
 
@@ -5249,7 +6320,7 @@ function renderSearchSuggestions() {
         <button class="suggestionItem" type="button" data-suggestion-part="${escapeHtml(part.part_number)}" role="option">
           <strong>${escapeHtml(part.part_number)}</strong>
           <span>${escapeHtml(part.name)}</span>
-          <small>${escapeHtml(part.project || "Unassigned project")} | ${escapeHtml(stateLabel(part.lifecycle_state))}</small>
+          <small>${escapeHtml(part.project || "Unassigned project")} | ${escapeHtml(releaseStatusLabel(part))}</small>
         </button>
       `
     )

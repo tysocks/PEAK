@@ -1,22 +1,22 @@
 # PEAK
 
 PEAK is a lightweight, offline-capable product registry for hardware teams. It
-tracks projects, parts, lifecycle state, revisions, linked design documents,
+tracks projects, parts, maturity, revisions, linked design documents,
 linked CAD objects, and bill-of-material relationships in a browser-based app.
 
-The app is currently implemented as a static web application. It can be opened
-from a shortcut or served from a small local HTTP server without installing a
-framework, package manager, database, or build tool. Product data is read from
-a local folder selected in the app.
+The app is implemented as a browser UI served by a small local runner. The
+runner serves the static PEAK files and performs trusted workstation actions
+that browser JavaScript cannot do, such as committing and pushing the product
+data Git repository with the user's existing Git credentials.
 
 ## Current Status
 
 PEAK is usable as a local registry prototype. It supports local editing against
 the selected product data folder, which should be the local Git checkout pushed
-to the production remote. Draft part edits can push directly to the
-`Launch-Canada/Product-Data` GitHub repository when a contents-write GitHub
-token is saved in Settings. Pull, branch, merge request creation, and approver
-assignment workflows still require a future local bridge or backend service.
+to the production remote. Draft part edits are saved locally and then pushed by
+the PEAK local runner to `Launch-Canada/Product-Data` using the workstation's
+normal Git authentication. Workflow transitions can either push directly to
+`main` or create a GitHub pull request through the local runner.
 
 ## Repository Layout
 
@@ -26,6 +26,9 @@ app/
   styles.css      Layout, dark UI theme, panes, tables, context menu
   app.js          App state, rendering, local folder persistence, interactions
   config.js       Local app configuration stub
+runner/
+  server.mjs      Local server and Git runner for pushes and workflow PRs
+package.json      Local runner scripts
 dev.md            Development notes and product direction
 README.md         This guide
 ```
@@ -55,18 +58,29 @@ parts/
 
 ## Quick Start
 
-Serve this app repository:
+Start the local PEAK runner:
 
 ```powershell
 cd "C:\Users\tyler\Documents\CLAUDE\PLM"
-py -m http.server 8765 --bind 127.0.0.1
+npm start
 ```
 
 Then open:
 
 ```text
-http://127.0.0.1:8765/app/index.html
+http://127.0.0.1:8765/
 ```
+
+On Windows, `Start PEAK.bat` does the same thing.
+
+By default, the runner uses:
+
+```text
+C:\Users\tyler\Documents\PROJECTS\PR6 - PLM
+```
+
+To point the runner at another product-data checkout, set
+`PEAK_PRODUCT_DATA_DIR` before starting PEAK.
 
 Open Settings, choose the Setup tab, and select the local product data folder.
 For PR6 production data, select:
@@ -79,6 +93,10 @@ PEAK reads `manifest.json` and the referenced `parts/` files directly from that
 folder. Project metadata is read from `projects.json`. Product changes are
 written back to the same folder so they can be committed and pushed to the
 remote from the local Git checkout.
+
+Workflow pull requests use GitHub CLI through the local runner. In PEAK, open
+Settings > Setup and click `Connect GitHub`; PEAK opens the browser login flow,
+copies the one-time code to the clipboard, and detects when GitHub is connected.
 
 ## Using PEAK
 
@@ -184,9 +202,9 @@ Before a draft is created, the intended workflow is:
 - Push the draft object directly to the remote.
 
 Draft creation does not require a merge request. Draft edit saves write the
-selected product data folder and can push the affected JSON files directly to
-`Launch-Canada/Product-Data` when a GitHub token with contents write access is
-configured in Settings.
+selected product data folder, then call the local PEAK runner to run `git add`,
+`git commit`, and `git push` in the product data repository. This uses the same
+Git Credential Manager or SSH setup that works from a normal terminal.
 
 Part numbers use the project code format:
 
@@ -217,19 +235,21 @@ You can create new project folders and save updates to project metadata.
 
 ### Sync
 
-Sync is the planned GitHub workflow view.
+Sync is the GitHub workflow view.
 
 It includes actions for:
 
-- Pulling the latest `master` branch.
+- Pulling the latest `main` branch.
 - Preparing a branch and merge request for local changes.
 - Importing a parts CSV.
 - Exporting a migration CSV.
 - Exporting a full PEAK JSON working-copy snapshot.
 
-At the moment, browser JavaScript cannot safely execute Git commands directly.
-The Sync page therefore records the desired workflow and indicates that a local
-Git bridge or backend service is required for actual GitHub operations.
+Browser JavaScript cannot safely execute Git commands directly. Draft edit
+pushes and workflow transitions now go through the local PEAK runner. Draft edit
+saves and Release Candidate transitions commit and push directly. Released,
+Obsolete, and product-maturity transitions create a branch, push it, and open a
+GitHub pull request using `gh pr create`.
 
 The migration CSV export writes one row per part revision. The JSON export keeps
 the full loaded product data snapshot, including stable part properties, revision
@@ -385,14 +405,12 @@ Stable part properties remain fixed across revisions:
 - `work_instructions`
 - `file_links`
 - `tags`
-- `manufacturers`
 - `revisions`
 
 Revision properties are unique to a specific object such as `ELEC-0001^A`:
 
 - `revision`
 - `release_status`
-- `lifecycle_state`
 - `owner`
 - `created_by`
 - `created_at`
@@ -401,7 +419,13 @@ Revision properties are unique to a specific object such as `ELEC-0001^A`:
 - `approvers`
 - `bom`
 - `attachments`
+- `activity_history`
 - `change_summary`
+
+Each revision keeps its own `activity_history` list. Activity entries include an
+`action`, `actor`, `performed_at` timestamp, and `detail` string for events such
+as `create`, `updated_properties`, `updated_maturity`, `updated_revision`,
+`created_revision`, and `updated_attachments`.
 
 PEAK flattens those documents into openable revision objects. For example,
 `ELEC-0001^A` can be searched, opened, and linked independently while remaining
@@ -424,33 +448,51 @@ Older fixture data using `in_review` is still tolerated and displayed as
 PEAK is intended to work without internet access for ordinary registry viewing
 and local editing.
 
-Internet access is only required for draft edit pushes to GitHub and any future
-authenticated integrations such as Google Drive or Onshape APIs.
+Internet access is only required for GitHub pushes, GitHub pull request
+creation, and any future authenticated integrations such as Google Drive or
+Onshape APIs.
 
 ## Updating PEAK
 
-After the GitHub remote is configured, update the app with:
+After the GitHub remote is configured, update PEAK with:
 
 ```powershell
 git pull origin main
 ```
 
-Merge-request workflows still need a local bridge or backend to create and
-assign GitHub review requests.
+Workflow pull requests require GitHub CLI authentication. Use the `Connect
+GitHub` button in Settings > Setup; if a workflow action needs authentication,
+PEAK shows the same action inline beside the workflow error.
+
+## Local App Route
+
+PEAK is now shaped to become a locally installed app:
+
+1. Current: dependency-free Node runner serves `app/` and exposes Git endpoints.
+2. Next: add runner endpoints for folder selection, pull, PR status polling, and
+   approver assignment.
+3. Then: wrap the runner and UI in Electron, following the ORCHE Runner pattern
+   with an Electron main process that starts the local server and opens PEAK.
+4. Packaging: add `electron`, `electron-builder`, and Windows NSIS packaging so
+   PEAK installs with a desktop shortcut and starts without a terminal.
+5. Later: add auto-update from `Launch-Canada/PEAK` once the installer flow is
+   stable.
 
 ## Development Notes
 
-This app intentionally avoids a build step for now. Keep changes compatible with
-plain browser JavaScript, HTML, and CSS unless the project is deliberately moved
-to a framework.
+The PEAK UI intentionally avoids a frontend build step for now. Keep UI changes
+compatible with plain browser JavaScript, HTML, and CSS unless the project is
+deliberately moved to a framework. Runner functionality belongs under `runner/`
+and should use local workstation capabilities rather than browser-only APIs.
 
 When editing:
 
-- Keep the app usable from a static local shortcut.
+- Keep the app usable through `npm start` and the local runner.
 - Preserve offline behavior.
-- Do not depend on third-party runtime packages.
+- Avoid third-party runtime packages unless they clearly simplify the runner or
+  future Electron packaging.
 - Keep local working-copy persistence intact.
-- Treat GitHub sync as a bridge/backend responsibility.
+- Treat GitHub sync as a local runner responsibility.
 
 ## Remote
 

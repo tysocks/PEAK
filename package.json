@@ -1,0 +1,14 @@
+{
+  "name": "peak-local-runner",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local runner for PEAK product data and Git sync",
+  "type": "module",
+  "scripts": {
+    "start": "node runner/server.mjs",
+    "dev": "node runner/server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
