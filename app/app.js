@@ -733,10 +733,10 @@ function renderApp() {
   } else {
     renderSearchWorkspace();
   }
+  syncChrome();
   enableColumnResizing();
   enableBomColumnResizing();
   enablePaneResizing();
-  syncChrome();
 }
 
 function renderSearchWorkspace() {
@@ -1962,8 +1962,10 @@ function renderSearchDetail() {
   }
 
   partDetail.innerHTML = `
-    ${propertyTabs()}
-    ${renderPropertyBody(part)}
+    <div class="searchDetailLayout">
+      ${propertyTabs()}
+      ${renderPropertyBody(part)}
+    </div>
   `;
 }
 
@@ -2007,7 +2009,7 @@ function propertyTabs() {
     <div class="propertyTabs" aria-label="Property sections">
       <button class="propertyTab${activePropertyTab === "overview" ? " active" : ""}" type="button" data-property-tab="overview">Overview</button>
       <button class="propertyTab${activePropertyTab === "attachments" ? " active" : ""}" type="button" data-property-tab="attachments">Attachments</button>
-      <button class="propertyTab${activePropertyTab === "history" ? " active" : ""}" type="button" data-property-tab="history">History</button>
+      <button class="propertyTab${activePropertyTab === "history" ? " active" : ""}" type="button" data-property-tab="history">Relation</button>
       <button class="propertyTab${activePropertyTab === "workflow" ? " active" : ""}" type="button" data-property-tab="workflow">Workflow</button>
     </div>
   `;
@@ -2179,6 +2181,7 @@ function traceabilityOptions() {
 function renderHistoryTab(part) {
   const activityItems = activityHistoryForPart(part);
   return `
+    ${renderWhereUsedHistory(part)}
     ${renderRevisionHistory(part)}
     <section class="propertySection">
       <h3>Activity</h3>
@@ -2987,6 +2990,61 @@ function renderRevisionHistory(part) {
   `;
 }
 
+function renderWhereUsedHistory(part) {
+  const rows = whereUsedRows(part);
+  return `
+    <section class="propertySection">
+      <h3>Where Used</h3>
+      ${rows.length ? `
+        <div class="detailTableWrap">
+          <table class="detailTable revisionHistoryTable">
+            <thead>
+              <tr>
+                <th scope="col">Object</th>
+                <th scope="col">Status</th>
+                <th scope="col">Updated By</th>
+                <th scope="col">Updated</th>
+                <th scope="col">Created By</th>
+                <th scope="col">Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(whereUsedRow).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : `<p class="empty">Not used in any BOM.</p>`}
+    </section>
+  `;
+}
+
+function whereUsedRows(part) {
+  return sortParts(whereUsed(part)).map((parent) => ({
+    partNumber: parent.part_number,
+    objectId: partKey(parent),
+    revision: parent.revision,
+    status: parent.release_status || parent.lifecycle_state,
+    updatedBy: updatedBy(parent),
+    updatedAt: parent.updated_at,
+    createdBy: createdBy(parent),
+    createdAt: parent.created_at
+  }));
+}
+
+function whereUsedRow(parent) {
+  const objectLabel = `${parent.partNumber || "Part"}^${parent.revision || "V1"}`;
+  return `
+    <tr>
+      <td><button class="linkButton" type="button" data-part-number="${escapeHtml(parent.objectId || objectLabel)}">${escapeHtml(objectLabel)}</button></td>
+      <td>${escapeHtml(releaseStatusLabel({ lifecycle_state: parent.status, release_status: parent.status }))}</td>
+      <td>${escapeHtml(parent.updatedBy || "Not set")}</td>
+      <td>${escapeHtml(parent.updatedAt || "Not set")}</td>
+      <td>${escapeHtml(parent.createdBy || "Not set")}</td>
+      <td>${escapeHtml(parent.createdAt || "Not set")}</td>
+    </tr>
+  `;
+}
+
 function revisionRows(part) {
   const siblingRevisions = parts.filter((candidate) => candidate.part_number === part.part_number);
   if (siblingRevisions.length > 1 || siblingRevisions[0] === part) {
@@ -3120,11 +3178,30 @@ function historyReference(object, title, detail) {
 
 function whereUsed(part) {
   return parts.filter((candidate) =>
-    (candidate.bom ?? []).some((item) => {
-      const child = resolveBomChild(item);
-      return child ? partKey(child) === partKey(part) : item.child_part_number === part.part_number;
-    })
+    (candidate.bom ?? []).some((item) => bomItemUsesPart(item, part))
   );
+}
+
+function bomItemUsesPart(item, part) {
+  if (!item || !part) {
+    return false;
+  }
+  const targetKey = partKey(part);
+  const objectChild = item.child_object_id ? findPartByKey(item.child_object_id) : null;
+  if (objectChild) {
+    return partKey(objectChild) === targetKey;
+  }
+  if (item.child_object_id && item.child_object_id === targetKey) {
+    return true;
+  }
+  if (item.child_part_number !== part.part_number) {
+    return false;
+  }
+  if (item.child_revision) {
+    return String(item.child_revision) === String(part.revision || "V1");
+  }
+  const child = resolveBomChild(item);
+  return child ? partKey(child) === targetKey : true;
 }
 
 function resolveBomChild(item) {
@@ -3465,8 +3542,10 @@ function syncChrome() {
   const isReportPane = activeNavMode === "report";
   const isProjectPane = activeNavMode === "projects";
   const isTablePane = activeNavMode === "table" || activeNavMode === "history";
+  const isHomePane = activeNavMode === "home";
   document.body.classList.toggle("openedPartMode", isOpened);
   document.body.classList.toggle("searchMode", !isOpened);
+  workspace.classList.toggle("homeWorkspace", isHomePane);
   workspace.classList.toggle("partWorkspace", isOpened);
   workspace.classList.toggle("partReadOnlyWorkspace", isOpened);
   workspace.classList.toggle("singlePaneWorkspace", isSinglePane);
@@ -3801,20 +3880,7 @@ partDetail.addEventListener("click", (event) => {
   if (!button) {
     return;
   }
-  if (preventPartNavigationDuringEdit(button.dataset.partNumber)) {
-    return;
-  }
-  if (button.dataset.historyRevision === "true" && activeNavMode === "part") {
-    moveToPart(button.dataset.partNumber);
-    return;
-  }
-  selectedPartNumber = button.dataset.partNumber;
-  selectedBomPartNumber = button.dataset.partNumber;
-  activeAttachmentEditMode = false;
-  activeAttachmentDraftCount = 0;
-  if (openedPartNumber) {
-    renderApp();
-  }
+  moveToPart(button.dataset.partNumber);
 });
 
 function handlePartAction(action) {
@@ -4780,7 +4846,7 @@ function enablePaneResizing() {
       event.preventDefault();
       handle.setPointerCapture(event.pointerId);
       document.body.classList.add("isResizing");
-      const { onMove } = getDragHandler(event.clientX);
+      const { onMove } = getDragHandler(event);
       function onUp(upEvent) {
         handle.releasePointerCapture(upEvent.pointerId);
         document.body.classList.remove("isResizing");
@@ -4792,17 +4858,37 @@ function enablePaneResizing() {
     });
   }
 
-  wire(leftHandle, (startX) => {
+  wire(leftHandle, (event) => {
+    const startX = event.clientX;
     const startWidth = document.querySelector(".navigatorPane")?.getBoundingClientRect().width ?? 270;
     return {
       onMove(e) {
-        workspace.style.setProperty("--nav-width", `${clamp(startWidth + e.clientX - startX, 160, 600)}px`);
+        const workspaceWidth = workspace.getBoundingClientRect().width;
+        const maxWidth = workspace.classList.contains("homeWorkspace") && window.matchMedia("(max-width: 1120px)").matches
+          ? Math.max(160, workspaceWidth - 260)
+          : 600;
+        workspace.style.setProperty("--nav-width", `${clamp(startWidth + e.clientX - startX, 140, maxWidth)}px`);
       }
     };
   });
 
-  wire(rightHandle, (startX) => {
+  wire(rightHandle, (event) => {
+    const startX = event.clientX;
     const isProject = workspace.classList.contains("projectWorkspace");
+    const isResponsiveSearch = workspace.classList.contains("homeWorkspace") && window.matchMedia("(max-width: 1120px)").matches;
+    if (isResponsiveSearch) {
+      const startY = event.clientY;
+      const startHeight = document.querySelector(".resultsPane")?.getBoundingClientRect().height
+        || document.querySelector(".navigatorPane")?.getBoundingClientRect().height
+        || 260;
+      return {
+        onMove(e) {
+          const workspaceHeight = workspace.getBoundingClientRect().height;
+          const maxTopHeight = Math.max(160, workspaceHeight - 180);
+          workspace.style.setProperty("--search-top-height", `${clamp(startHeight + e.clientY - startY, 120, maxTopHeight)}px`);
+        }
+      };
+    }
     const startWidth = document.querySelector(".resultsPane")?.getBoundingClientRect().width ?? 280;
     return {
       onMove(e) {

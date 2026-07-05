@@ -410,6 +410,7 @@ code {
 .workspace {
   --nav-width: 270px;
   --results-width: 20%;
+  --search-top-height: 40%;
   height: 100%;
   min-height: 0;
   min-width: 0;
@@ -2575,11 +2576,20 @@ body[data-accent="orange"] {
     max-width: min(440px, 100%);
   }
 
-  .workspace:not(.singlePaneWorkspace):not(.projectWorkspace):not(.tabularWorkspace):not(.reportWorkspace):not(.partReadOnlyWorkspace),
+  .workspace.homeWorkspace,
   .workspace.partWorkspace {
     --nav-width: 200px;
     grid-template-columns: var(--nav-width) minmax(0, 1fr);
     grid-template-rows: minmax(0, 40%) minmax(0, 60%);
+  }
+
+  .workspace.homeWorkspace {
+    grid-template-columns: var(--nav-width) 6px minmax(0, 1fr);
+    grid-template-rows: minmax(160px, var(--search-top-height)) 6px minmax(180px, 1fr);
+    grid-template-areas:
+      "navigator nav-resize results"
+      "detail-resize detail-resize detail-resize"
+      "details details details";
   }
 
   .workspace.partReadOnlyWorkspace {
@@ -2597,14 +2607,42 @@ body[data-accent="orange"] {
     display: none;
   }
 
+  .homeWorkspace .resizeHandle {
+    display: block;
+  }
+
+  .homeWorkspace .resizeHandleLeft {
+    grid-area: nav-resize;
+    cursor: col-resize;
+  }
+
+  .homeWorkspace .resizeHandleRight {
+    grid-area: detail-resize;
+    cursor: row-resize;
+  }
+
+  .homeWorkspace .resizeHandleRight::after {
+    inset: 2px 0;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
   .navigatorPane {
     grid-column: 1;
     grid-row: 1;
   }
 
+  .homeWorkspace .navigatorPane {
+    grid-area: navigator;
+  }
+
   .resultsPane {
     grid-column: 2;
     grid-row: 1;
+  }
+
+  .homeWorkspace .resultsPane {
+    grid-area: results;
   }
 
   .propertiesPane {
@@ -2613,6 +2651,19 @@ body[data-accent="orange"] {
     max-height: none;
     border-left: none;
     border-top: 1px solid var(--border);
+  }
+
+  .homeWorkspace .propertiesPane {
+    grid-area: details;
+    width: 100%;
+    min-width: 0;
+    border-top: none;
+  }
+
+  .homeWorkspace #partDetail,
+  .homeWorkspace .searchDetailLayout {
+    width: 100%;
+    min-width: 0;
   }
 
   .workspace.partReadOnlyWorkspace .propertiesPane {
@@ -2726,6 +2777,37 @@ body[data-accent="orange"] {
   .workspace.partWorkspace,
   .workspace.partReadOnlyWorkspace {
     grid-template-columns: 1fr;
+  }
+
+  .workspace.homeWorkspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(160px, var(--search-top-height)) 6px minmax(160px, 1fr);
+    grid-template-areas:
+      "navigator"
+      "results"
+      "detail-resize"
+      "details";
+  }
+
+  .homeWorkspace .resizeHandleLeft {
+    display: none;
+  }
+
+  .homeWorkspace .resizeHandleRight {
+    display: block;
+    grid-area: detail-resize;
+  }
+
+  .homeWorkspace .navigatorPane {
+    grid-area: navigator;
+  }
+
+  .homeWorkspace .resultsPane {
+    grid-area: results;
+  }
+
+  .homeWorkspace .propertiesPane {
+    grid-area: details;
   }
 
   .workspace.partReadOnlyWorkspace .propertiesPane {
