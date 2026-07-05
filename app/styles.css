@@ -2567,29 +2567,74 @@ body[data-accent="orange"] {
     grid-template-columns: minmax(0, 1fr) 130px 130px;
   }
 
-  .workspace,
-  .workspace.partWorkspace,
+  .createFormRow td {
+    padding: 18px 20px;
+  }
+
+  .createForm {
+    max-width: min(440px, 100%);
+  }
+
+  .workspace:not(.singlePaneWorkspace):not(.projectWorkspace):not(.tabularWorkspace):not(.reportWorkspace):not(.partReadOnlyWorkspace),
+  .workspace.partWorkspace {
+    --nav-width: 200px;
+    grid-template-columns: var(--nav-width) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 40%) minmax(0, 60%);
+  }
+
   .workspace.partReadOnlyWorkspace {
     --nav-width: 200px;
     grid-template-columns: var(--nav-width) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .workspace.singlePaneWorkspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .resizeHandle {
     display: none;
   }
 
+  .navigatorPane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .resultsPane {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
   .propertiesPane {
     grid-column: 1 / -1;
-    max-height: 40vh;
+    grid-row: 2;
+    max-height: none;
     border-left: none;
     border-top: 1px solid var(--border);
   }
 
   .workspace.partReadOnlyWorkspace .propertiesPane {
     grid-column: 2;
+    grid-row: 1;
     max-height: none;
     border-top: none;
     border-left: 1px solid var(--border);
+  }
+
+  .singlePaneWorkspace .resultsPane,
+  .projectWorkspace .resultsPane,
+  .tabularWorkspace .resultsPane,
+  .reportWorkspace .resultsPane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .projectWorkspace .propertiesPane,
+  .tabularWorkspace .propertiesPane {
+    grid-column: 3;
+    grid-row: 1;
   }
 }
 
@@ -2618,10 +2663,6 @@ body[data-accent="orange"] {
 
   .treeNode.root {
     padding-left: 8px;
-  }
-
-  .propertiesPane {
-    max-height: 38vh;
   }
 
   .createHub {

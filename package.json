@@ -1,15 +1,19 @@
 {
-  "name": "peak-local-runner",
+  "name": "peak-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "Local runner for PEAK product data and Git sync",
+  "description": "PEAK desktop product registry",
+  "author": "Launch Canada",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
-    "start": "node runner/server.mjs",
-    "dev": "node runner/server.mjs",
+    "start": "electron .",
+    "dev": "electron .",
     "electron": "electron .",
     "electron:dev": "electron .",
+    "web": "node runner/server.mjs",
+    "dev:web": "node runner/server.mjs",
+    "pack": "electron-builder --dir",
     "dist": "electron-builder --win nsis"
   },
   "engines": {
@@ -22,6 +26,10 @@
   "build": {
     "appId": "ca.launchcanada.peak",
     "productName": "PEAK",
+    "asarUnpack": [
+      "app/**/*",
+      "runner/**/*"
+    ],
     "files": [
       "app/**/*",
       "electron/**/*",
@@ -29,7 +37,8 @@
       "package.json"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,

@@ -1,13 +1,14 @@
 # PEAK
 
-PEAK is a lightweight, offline-capable product registry for hardware teams. It
-tracks projects, parts, maturity, revisions, linked design documents,
-linked CAD objects, and bill-of-material relationships in a browser-based app.
+PEAK is a lightweight, offline-capable desktop product registry for hardware
+teams. It tracks projects, parts, maturity, revisions, linked design documents,
+linked CAD objects, and bill-of-material relationships.
 
-The app is implemented as a browser UI served by a small local runner. The
-runner serves the static PEAK files and performs trusted workstation actions
-that browser JavaScript cannot do, such as committing and pushing the product
-data Git repository with the user's existing Git credentials.
+The app is implemented as an Electron desktop shell around a browser UI and a
+small local runner. The runner serves the static PEAK files and performs trusted
+workstation actions that browser JavaScript cannot do, such as committing and
+pushing the product data Git repository with the user's existing Git
+credentials.
 
 ## Current Status
 
@@ -29,7 +30,8 @@ app/
 runner/
   server.mjs      Local server and Git runner for pushes and workflow PRs
 electron/
-  main.mjs        Initial Electron shell that starts the runner and opens PEAK
+  main.mjs        Electron shell that starts the runner and opens PEAK
+  preload.mjs     Safe desktop bridge for native folder selection
 package.json      Local runner scripts
 peak.config.example.json
                   Example local runner product-data path config
@@ -62,20 +64,15 @@ parts/
 
 ## Quick Start
 
-Start the local PEAK runner:
+Install dependencies once, then start the PEAK desktop app:
 
 ```powershell
 cd "C:\Users\tyler\Documents\CLAUDE\PLM"
+npm install
 npm start
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8765/
-```
-
-On Windows, `Start PEAK.bat` does the same thing.
+On Windows, `Start PEAK.bat` starts the same Electron app.
 
 The runner no longer defaults to a workstation-specific product-data path. It
 uses the first available configuration source:
@@ -84,14 +81,21 @@ uses the first available configuration source:
 2. Local `peak.config.json` copied from `peak.config.example.json`.
 3. A portable `Product-Data` folder beside or inside the PEAK checkout.
 
+When running the installed desktop app, the selected Product-Data folder is
+stored in the user's PEAK app data folder. When running only the web runner,
 `peak.config.json` is ignored by Git so each workstation can point PEAK at its
 own local Product-Data checkout.
 
-To try the desktop shell during development, install dependencies and run:
+To run the browser-served development version instead of Electron:
 
 ```powershell
-npm install
-npm run electron
+npm run web
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765/
 ```
 
 The Electron shell starts the same local runner, opens PEAK in a desktop
@@ -476,19 +480,19 @@ Workflow pull requests require GitHub CLI authentication. Use the `Connect
 GitHub` button in Settings > Setup; if a workflow action needs authentication,
 PEAK shows the same action inline beside the workflow error.
 
-## Local App Route
+## Desktop Packaging
 
-PEAK is now shaped to become a locally installed app:
+PEAK is packaged with Electron Builder:
 
-1. Current: Node runner serves `app/` and exposes Git/config endpoints.
-2. Current: initial Electron main process starts the runner and opens PEAK.
-3. Next: add native folder selection in Electron and wire it to the runner
-   product-data config endpoint.
-4. Next: validate `electron-builder` Windows NSIS packaging and installer
-   shortcuts.
-5. Later: add PR status polling, approver assignment, and auto-update from
-   `Launch-Canada/PEAK` once the installer flow is
-   stable.
+```powershell
+npm run pack
+npm run dist
+```
+
+`npm run pack` creates an unpacked desktop build for local verification.
+`npm run dist` creates a Windows NSIS installer with Start Menu and desktop
+shortcuts. Packaging keeps the app files unpacked so the spawned local runner
+can execute normally.
 
 ## Development Notes
 
@@ -500,6 +504,7 @@ and should use local workstation capabilities rather than browser-only APIs.
 When editing:
 
 - Keep the app usable through `npm start` and the local runner.
+- Keep the browser-served runner usable through `npm run web`.
 - Preserve offline behavior.
 - Avoid third-party runtime packages unless they clearly simplify the runner or
   future Electron packaging.

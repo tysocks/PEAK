@@ -11,7 +11,9 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const appRoot = path.join(repoRoot, "app");
-const configPath = path.join(repoRoot, "peak.config.json");
+const configPath = process.env.PEAK_CONFIG_PATH
+  ? path.resolve(process.env.PEAK_CONFIG_PATH)
+  : path.join(repoRoot, "peak.config.json");
 const port = Number(process.env.PEAK_PORT || process.env.PORT || 8765);
 let productDataDir = resolveProductDataDir();
 

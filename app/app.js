@@ -50,6 +50,7 @@ let connections = loadConnections();
 let customProjects = loadProjects();
 let productDataDirectoryHandle = null;
 let productDataFolderName = localStorage.getItem("peakProductDataFolderName") || "";
+let runnerProductDataDir = "";
 
 const productDataDbName = "peakProductData";
 const productDataStoreName = "handles";
@@ -58,6 +59,7 @@ const productDataGithubRepo = "Product-Data";
 const productDataGithubBranch = "main";
 const productDataGithubUrl = `https://github.com/${productDataGithubOwner}/${productDataGithubRepo}`;
 const peakRunnerProductDataUrl = "/api/product-data";
+const peakRunnerConfigUrl = "/api/config";
 const peakRunnerPushUrl = "/api/git/push-draft";
 const peakRunnerWorkflowUrl = "/api/git/workflow-transition";
 const peakRunnerPullMainUrl = "/api/git/pull-main";
@@ -257,13 +259,13 @@ async function loadParts() {
     const runnerPayload = await loadPartsFromRunner();
     loadedParts = runnerPayload.parts;
     customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
-    productDataFolderName = runnerPayload.folderName || productDataFolderName || "Product data runner";
-    localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+    setProductDataFolderFromRunnerPayload(runnerPayload);
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
     loadedFromRunner = true;
   } catch (error) {
     console.info("PEAK runner product data is not available; falling back to browser folder access.", error);
+    await syncRunnerConfigDisplay();
   }
 
   if (!loadedFromRunner && productDataDirectoryHandle) {
@@ -308,6 +310,33 @@ async function loadPartsFromRunner() {
   return payload;
 }
 
+async function syncRunnerConfigDisplay() {
+  try {
+    const response = await fetch(peakRunnerConfigUrl, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      return null;
+    }
+    runnerProductDataDir = payload.productDataDir || "";
+    if (runnerProductDataDir) {
+      productDataFolderName = runnerProductDataDir;
+      localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+    } else if (!productDataDirectoryHandle) {
+      productDataFolderName = "";
+      localStorage.removeItem("peakProductDataFolderName");
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function setProductDataFolderFromRunnerPayload(payload) {
+  runnerProductDataDir = payload.productDataDir || runnerProductDataDir;
+  productDataFolderName = runnerProductDataDir || payload.folderName || productDataFolderName || "Product data runner";
+  localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+}
+
 async function pullMainFromRunner() {
   const previousSelected = selectedPartNumber;
   const previousOpened = openedPartNumber;
@@ -323,7 +352,7 @@ async function pullMainFromRunner() {
     const runnerPayload = await loadPartsFromRunner();
     parts = sortParts(runnerPayload.parts);
     customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
-    productDataFolderName = runnerPayload.folderName || productDataFolderName;
+    setProductDataFolderFromRunnerPayload(runnerPayload);
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
     selectedPartNumber = findPartByKey(previousSelected) ? previousSelected : partKey(parts[0]) || null;
@@ -535,11 +564,13 @@ async function selectProductDataFolderFromDesktop() {
       throw new Error(payload.message || "Could not configure product data folder");
     }
     productDataDirectoryHandle = null;
-    productDataFolderName = selection.name || payload.productDataDir || "Product-Data";
+    runnerProductDataDir = payload.productDataDir || selection.path || "";
+    productDataFolderName = runnerProductDataDir || selection.name || "Product-Data";
     localStorage.setItem("peakProductDataFolderName", productDataFolderName);
     const runnerPayload = await loadPartsFromRunner();
     parts = sortParts(runnerPayload.parts);
     customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
+    setProductDataFolderFromRunnerPayload(runnerPayload);
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
     selectedPartNumber = partKey(parts[0]) || null;
@@ -689,6 +720,9 @@ function initRoute() {
     selectedPartNumber = partKey(opened);
     activeNavMode = "part";
     activePartEditMode = params.get("edit") === "1";
+    if (activePartEditMode && !isDraftRevision(opened)) {
+      activePartEditMode = false;
+    }
   }
 }
 
@@ -997,6 +1031,33 @@ function getOpenedPart() {
 
 function getSelectedBomPart() {
   return findPartByKey(selectedBomPartNumber || openedPartNumber);
+}
+
+function partEditNavigationLocked() {
+  return activeNavMode === "part" && activePartEditMode && Boolean(openedPartNumber);
+}
+
+function normalizePartIdentifier(identifier) {
+  const part = findPartByKey(identifier);
+  return part ? partKey(part) : identifier;
+}
+
+function preventPartNavigationDuringEdit(targetIdentifier) {
+  if (!partEditNavigationLocked()) {
+    return false;
+  }
+  const targetKey = normalizePartIdentifier(targetIdentifier);
+  if (!targetKey || targetKey === openedPartNumber) {
+    return false;
+  }
+  selectedPartNumber = openedPartNumber;
+  selectedBomPartNumber = openedPartNumber;
+  activeAttachmentEditMode = false;
+  activeAttachmentDraftCount = 0;
+  statusMessage = "Save or cancel the current part edit before opening another part";
+  window.history.replaceState({}, "", partUrl(openedPartNumber, { editMode: true }));
+  renderApp();
+  return true;
 }
 
 function renderObjectRows(visibleParts) {
@@ -1718,6 +1779,7 @@ function partEditorSelectRow(label, field, value, options, notes) {
 }
 
 function renderSettingsRows() {
+  const productDataFolderDisplay = productDataFolderName || "No folder selected";
   const tabBar = `
     <tr class="settingsTabRow">
       <td colspan="10">
@@ -1743,7 +1805,7 @@ function renderSettingsRows() {
         <td>Product Data Folder</td>
         <td>
           <div class="folderPicker">
-            <input class="tableInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderName || "No folder selected")}" readonly>
+            <input class="tableInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderDisplay)}" readonly>
             <button class="iconButton formAction" type="button" data-select-product-folder title="Select product data folder" aria-label="Select product data folder" data-icon="folder"></button>
           </div>
         </td>
@@ -2009,7 +2071,7 @@ function attachmentEditRow(index = 0) {
       <label class="propertyEditField">
         <span>Type</span>
         <select class="tableInput" data-attachment-field="type">
-          ${attachmentTypeOptions().map((type) => `<option value="${escapeHtml(type)}"${index === 0 && type === "DRAWINGS" ? " selected" : ""}>${escapeHtml(type)}</option>`).join("")}
+          ${attachmentTypeOptions().map((type) => `<option value="${escapeHtml(type)}"${index === 0 && type === "DRAWING" ? " selected" : ""}>${escapeHtml(type)}</option>`).join("")}
         </select>
       </label>
       <button class="iconButton attachmentRemoveButton attachmentRemoveRowButton" type="button" data-remove-new-attachment title="Remove row" aria-label="Remove row"></button>
@@ -2018,7 +2080,22 @@ function attachmentEditRow(index = 0) {
 }
 
 function attachmentTypeOptions() {
-  return ["DRAWINGS", "TEST REPORTS", "ANALYSIS", "WORK INSTRUCTIONS", "OTHER"];
+  return [
+    "ANALYSIS",
+    "ANOMALY ANALYSIS",
+    "CAD MODEL",
+    "DESIGN REPORT",
+    "DRAWING",
+    "MATERIAL SPECIFICATION",
+    "OTHER ATTACHMENTS",
+    "PROCESS SPECIFICATION",
+    "SCHEMATIC",
+    "SPECIFICATION",
+    "TEST PLAN",
+    "TEST REPORT",
+    "TEST SPECIFICATION",
+    "USER MANUAL"
+  ];
 }
 
 function renderOverviewTab(part) {
@@ -2026,7 +2103,6 @@ function renderOverviewTab(part) {
   const legacyPartNumber = legacyPartNumberValue(part);
   const propertyRows = [
     property("Part No", part.part_number),
-    editing || legacyPartNumber ? editing ? propertyEditInline("Legacy Part No", "legacy_part_number", legacyPartNumber) : property("Legacy Part No", legacyPartNumber) : "",
     property("Revision", part.revision),
     editing ? propertyEditInline("Name", "name", part.name) : property("Name", part.name),
     editing ? propertyEditInline("Description", "description", part.description || "", { textarea: true }) : property("Description", part.description || "Not set"),
@@ -2042,6 +2118,11 @@ function renderOverviewTab(part) {
           editing ? propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")) : propertyLink("Google Drive Link", documentUrl(part, "drive")),
           editing ? propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")) : propertyLink("Onshape Link", documentUrl(part, "onshape")),
           editing ? propertyEditInline("Work Instructions Link", "workUrl", documentUrl(part, "work")) : propertyLink("Work Instructions Link", documentUrl(part, "work"))
+        ])}
+        ${detailSection("Optional Properties", [
+          editing ? propertyEditInline("Legacy Number", "legacy_part_number", legacyPartNumber) : property("Legacy Number", legacyPartNumber || "Not set"),
+          editing ? propertyEditInline("Cost", "cost", optionalPartPropertyValue(part, "cost")) : property("Cost", optionalPartPropertyValue(part, "cost") || "Not set"),
+          editing ? propertyEditInline("Mass", "mass", optionalPartPropertyValue(part, "mass")) : property("Mass", optionalPartPropertyValue(part, "mass") || "Not set")
         ])}
         ${detailSection("Authoring", [
           property("Release Status", releaseStatusLabel(part)),
@@ -2317,6 +2398,10 @@ function legacyPartNumberValue(part) {
   return String(part?.legacy_part_number || part?.legacyPartNumber || part?.part_properties?.legacy_part_number || part?.part_properties?.legacyPartNumber || "").trim();
 }
 
+function optionalPartPropertyValue(part, key) {
+  return String(part?.[key] ?? part?.part_properties?.[key] ?? "").trim();
+}
+
 function traceabilityValue(part) {
   return normalizeTraceability(part?.traceability);
 }
@@ -2399,17 +2484,27 @@ function groupedAttachments(part) {
 }
 
 function attachmentTypeLabel(record) {
-  const raw = String(record?.type || record?.category || "OTHER").trim();
+  const raw = String(record?.type || record?.category || "OTHER ATTACHMENTS").trim();
   const normalized = raw
     .replaceAll("_", " ")
     .replaceAll("-", " ")
     .toUpperCase();
-  if (normalized.includes("DRAWING")) return "DRAWINGS";
-  if (normalized.includes("TEST")) return "TEST REPORTS";
+  if (attachmentTypeOptions().includes(normalized)) return normalized;
+  if (normalized.includes("ANOMALY") && normalized.includes("ANALYSIS")) return "ANOMALY ANALYSIS";
   if (normalized.includes("ANALYSIS")) return "ANALYSIS";
-  if (normalized.includes("WORK") || normalized.includes("INSTRUCTION")) return "WORK INSTRUCTIONS";
-  if (normalized.includes("DRIVE") || normalized.includes("FILE") || normalized.includes("DOCUMENT")) return "DRAWINGS";
-  return normalized || "OTHER";
+  if (normalized.includes("CAD") || normalized.includes("ONSHAPE") || normalized.includes("MODEL")) return "CAD MODEL";
+  if (normalized.includes("DESIGN") && normalized.includes("REPORT")) return "DESIGN REPORT";
+  if (normalized.includes("DRAWING")) return "DRAWING";
+  if (normalized.includes("SCHEMATIC")) return "SCHEMATIC";
+  if (normalized.includes("TEST") && normalized.includes("PLAN")) return "TEST PLAN";
+  if (normalized.includes("TEST") && normalized.includes("SPEC")) return "TEST SPECIFICATION";
+  if (normalized.includes("TEST")) return "TEST REPORT";
+  if (normalized.includes("MATERIAL") && normalized.includes("SPEC")) return "MATERIAL SPECIFICATION";
+  if (normalized.includes("PROCESS") && normalized.includes("SPEC")) return "PROCESS SPECIFICATION";
+  if (normalized.includes("SPEC")) return "SPECIFICATION";
+  if (normalized.includes("MANUAL")) return "USER MANUAL";
+  if (normalized.includes("DRIVE") || normalized.includes("FILE") || normalized.includes("DOCUMENT")) return "DRAWING";
+  return "OTHER ATTACHMENTS";
 }
 
 function attachmentRecordKey(record) {
@@ -2971,8 +3066,6 @@ function bomReference(item) {
 
 function fileReference(record, { editable = false } = {}) {
   const title = record.title;
-  const type = record.type;
-  const id = record.google_drive_file_id || record.document_id || record.workspace_id || "No identifier";
   const removeButton = editable
     ? `<button class="iconButton attachmentRemoveButton" type="button" data-remove-attachment="${escapeHtml(attachmentRecordKey(record))}" title="Remove attachment" aria-label="Remove attachment"></button>`
     : "";
@@ -2982,7 +3075,6 @@ function fileReference(record, { editable = false } = {}) {
         <strong><a href="${escapeHtml(record.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a></strong>
         ${removeButton}
       </div>
-      <p>${escapeHtml(type)} | ${escapeHtml(id)}</p>
     </article>
   `;
 }
@@ -3314,6 +3406,9 @@ function openSelectedPart({ newTab = false, editMode = false } = {}) {
   if (!selectedPartNumber) {
     return;
   }
+  if (!newTab && preventPartNavigationDuringEdit(selectedPartNumber)) {
+    return;
+  }
   const url = partUrl(selectedPartNumber, { editMode });
   if (newTab) {
     window.open(url, "_blank", "noopener,noreferrer");
@@ -3330,6 +3425,9 @@ function openSelectedPart({ newTab = false, editMode = false } = {}) {
 }
 
 function moveToPart(partNumber, { editMode = false } = {}) {
+  if (preventPartNavigationDuringEdit(partNumber)) {
+    return;
+  }
   const part = findPartByKey(partNumber);
   if (!part) {
     return;
@@ -3433,6 +3531,9 @@ partsList.addEventListener("click", (event) => {
   }
   const row = event.target.closest("[data-part-number]");
   if (!row) {
+    return;
+  }
+  if (preventPartNavigationDuringEdit(row.dataset.partNumber)) {
     return;
   }
   selectedPartNumber = row.dataset.partNumber;
@@ -3548,6 +3649,9 @@ partsList.addEventListener("dblclick", (event) => {
   if (!row) {
     return;
   }
+  if (preventPartNavigationDuringEdit(row.dataset.partNumber)) {
+    return;
+  }
   selectedPartNumber = row.dataset.partNumber;
   if (row.dataset.bomPartNumber) {
     selectedBomPartNumber = row.dataset.bomPartNumber;
@@ -3572,6 +3676,9 @@ partsList.addEventListener("keydown", (event) => {
     return;
   }
   event.preventDefault();
+  if (preventPartNavigationDuringEdit(row.dataset.partNumber)) {
+    return;
+  }
   selectedPartNumber = row.dataset.partNumber;
   if (event.key === "Enter") {
     openSelectedPart({ newTab: true });
@@ -3641,6 +3748,10 @@ partDetail.addEventListener("click", (event) => {
     activeAttachmentEditMode = false;
     activeAttachmentDraftCount = 0;
     if (openedPartNumber) {
+      selectedPartNumber = openedPartNumber;
+      selectedBomPartNumber = openedPartNumber;
+    }
+    if (openedPartNumber) {
       window.history.replaceState({}, "", partUrl(openedPartNumber));
     }
     renderApp();
@@ -3690,6 +3801,9 @@ partDetail.addEventListener("click", (event) => {
   if (!button) {
     return;
   }
+  if (preventPartNavigationDuringEdit(button.dataset.partNumber)) {
+    return;
+  }
   if (button.dataset.historyRevision === "true" && activeNavMode === "part") {
     moveToPart(button.dataset.partNumber);
     return;
@@ -3710,6 +3824,14 @@ function handlePartAction(action) {
     return;
   }
   if (!part) {
+    return;
+  }
+
+  if (activePartEditMode && ["edit-attachments", "submit-workflow"].includes(action)) {
+    statusMessage = "Save or cancel the current part edit before changing views";
+    selectedPartNumber = openedPartNumber;
+    selectedBomPartNumber = openedPartNumber;
+    renderApp();
     return;
   }
 
@@ -3735,6 +3857,9 @@ function handlePartAction(action) {
     activeAttachmentEditMode = false;
     activePropertyTab = "overview";
     activeAttachmentDraftCount = 0;
+    selectedPartNumber = partKey(part);
+    selectedBomPartNumber = partKey(part);
+    openedPartNumber = partKey(part);
     window.history.replaceState({}, "", partUrl(partKey(part), { editMode: true }));
     renderApp();
     return;
@@ -4139,6 +4264,9 @@ navigationTree.addEventListener("click", (event) => {
   }
 
   if (button.dataset.bomPartNumber) {
+    if (preventPartNavigationDuringEdit(button.dataset.bomPartNumber)) {
+      return;
+    }
     selectedBomPartNumber = button.dataset.bomPartNumber;
     renderApp();
     return;
@@ -4258,17 +4386,24 @@ partContextMenu.addEventListener("click", (event) => {
   if (!partNumber) {
     return;
   }
-  selectedPartNumber = partNumber;
   hidePartContextMenu();
   if (actionButton.dataset.contextAction === "open") {
+    if (preventPartNavigationDuringEdit(partNumber)) {
+      return;
+    }
+    selectedPartNumber = partNumber;
     openSelectedPart();
     return;
   }
   if (actionButton.dataset.contextAction === "open-new-tab") {
-    openSelectedPart({ newTab: true });
+    window.open(partUrl(partNumber), "_blank", "noopener,noreferrer");
     return;
   }
   if (actionButton.dataset.contextAction === "edit") {
+    if (preventPartNavigationDuringEdit(partNumber)) {
+      return;
+    }
+    selectedPartNumber = partNumber;
     openSelectedPart({ editMode: true });
   }
 });
@@ -4970,6 +5105,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
   values.name ??= part.name || "";
   values.description ??= part.description || "";
   values.legacy_part_number ??= legacyPartNumberValue(part);
+  values.cost ??= optionalPartPropertyValue(part, "cost");
+  values.mass ??= optionalPartPropertyValue(part, "mass");
   values.traceability ??= traceabilityValue(part) || "LOT";
   values.maturity = part.maturity || maturityStageValue(part);
   values.driveUrl ??= documentUrl(part, "drive");
@@ -4998,6 +5135,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
     sibling.name = values.name;
     sibling.description = values.description || "";
     sibling.legacy_part_number = values.legacy_part_number || "";
+    sibling.cost = values.cost || "";
+    sibling.mass = values.mass || "";
     sibling.traceability = normalizeTraceability(values.traceability) || "LOT";
     sibling.maturity = values.maturity || sibling.maturity || "development";
     sibling.file_links = stableFileLinks;
@@ -5010,6 +5149,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
       name: sibling.name,
       description: sibling.description,
       legacy_part_number: sibling.legacy_part_number,
+      cost: sibling.cost,
+      mass: sibling.mass,
       project: sibling.project,
       traceability: traceabilityValue(sibling),
       maturity: sibling.maturity,
@@ -5139,7 +5280,7 @@ function attachmentRowsFromForm() {
       statusMessage = "Attachment title and link are required";
       return null;
     }
-    const type = attachmentTypeLabel({ type: values.type || "OTHER" });
+    const type = attachmentTypeLabel({ type: values.type || "OTHER ATTACHMENTS" });
     attachments.push({
       type,
       title: values.title,
@@ -5308,8 +5449,9 @@ function showSyncAction(action) {
 }
 
 function saveSettingsFromForm() {
-  statusMessage = productDataDirectoryHandle
-    ? `Using product data folder ${productDataFolderName}; remote ${productDataGithubOwner}/${productDataGithubRepo}`
+  const configuredProductData = runnerProductDataDir || (productDataDirectoryHandle ? productDataFolderName : "");
+  statusMessage = configuredProductData
+    ? `Using product data folder ${configuredProductData}; remote ${productDataGithubOwner}/${productDataGithubRepo}`
     : "Select a product data folder to load PEAK data";
   renderApp();
 }
@@ -6217,7 +6359,9 @@ function workflowRunnerInlineSuccessMessage(payload, mode, title) {
 
 function runnerErrorMessage(error) {
   if (error instanceof TypeError) {
-    return "start PEAK with npm start so the local runner can use Git credentials.";
+    return window.peakDesktop
+      ? "restart PEAK so the local desktop runner can use Git credentials."
+      : "start PEAK with npm run web so the local runner can use Git credentials.";
   }
   return error.message || "unknown runner error";
 }
@@ -6251,6 +6395,8 @@ function productPartProperties(partNumber, revisions) {
     name: representative.name,
     description: representative.description || "",
     legacy_part_number: legacyPartNumberValue(representative) || undefined,
+    cost: optionalPartPropertyValue(representative, "cost") || undefined,
+    mass: optionalPartPropertyValue(representative, "mass") || undefined,
     project: representative.project,
     traceability: traceabilityValue(representative) || "LOT",
     maturity: representative.maturity || "development",
