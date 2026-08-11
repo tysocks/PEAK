@@ -36,6 +36,16 @@ let activeHistorySort = { column: "performed_at", direction: "desc" };
 let historyColumnFilters = {};
 let collapsedBomNodes = new Set();
 let activeBomAddParent = "";
+let activeBomPaneWidthRatio = loadBomPaneWidthRatio();
+const bomColumnDefinitions = {
+  item: { label: "Item", width: 150 },
+  name: { label: "Name", width: 180 },
+  quantity: { label: "Qty", width: 80 },
+  revision: { label: "Rev", width: 65 },
+  status: { label: "Status", width: 110 }
+};
+const bomDefaultColumnOrder = ["item", "name", "quantity", "revision", "status"];
+let activeBomColumnOrder = loadBomColumnOrder();
 let activeSettingsTab = "setup";
 let activeColorScheme = localStorage.getItem("peakColorScheme") || "dark";
 let activeAccentColor = localStorage.getItem("peakAccentColor") || "teal";
@@ -51,21 +61,24 @@ let customProjects = loadProjects();
 let productDataDirectoryHandle = null;
 let productDataFolderName = localStorage.getItem("peakProductDataFolderName") || "";
 let runnerProductDataDir = "";
+let productDataRemote = "";
 
 const productDataDbName = "peakProductData";
 const productDataStoreName = "handles";
-const productDataGithubOwner = "Launch-Canada";
-const productDataGithubRepo = "Product-Data";
 const productDataGithubBranch = "main";
-const productDataGithubUrl = `https://github.com/${productDataGithubOwner}/${productDataGithubRepo}`;
 const peakRunnerProductDataUrl = "/api/product-data";
 const peakRunnerConfigUrl = "/api/config";
 const peakRunnerPushUrl = "/api/git/push-draft";
 const peakRunnerWorkflowUrl = "/api/git/workflow-transition";
 const peakRunnerPullMainUrl = "/api/git/pull-main";
 const peakRunnerConfigProductDataFolderUrl = "/api/config/product-data-folder";
+const peakRunnerConfigProductDataRemoteUrl = "/api/config/product-data-remote";
 const peakRunnerGitHubAuthStatusUrl = "/api/github/auth-status";
 const peakRunnerGitHubAuthLoginUrl = "/api/github/auth-login";
+
+function productDataRemoteLabel() {
+  return productDataRemote || "configured product data remote";
+}
 
 const accentPresets = [
   { id: "teal", name: "Teal", color: "#35d1a8" },
@@ -260,6 +273,7 @@ async function loadParts() {
     loadedParts = runnerPayload.parts;
     customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
     setProductDataFolderFromRunnerPayload(runnerPayload);
+    await syncRunnerConfigDisplay();
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
     loadedFromRunner = true;
@@ -318,6 +332,7 @@ async function syncRunnerConfigDisplay() {
       return null;
     }
     runnerProductDataDir = payload.productDataDir || "";
+    productDataRemote = payload.remote || "";
     if (runnerProductDataDir) {
       productDataFolderName = runnerProductDataDir;
       localStorage.setItem("peakProductDataFolderName", productDataFolderName);
@@ -341,7 +356,7 @@ async function pullMainFromRunner() {
   const previousSelected = selectedPartNumber;
   const previousOpened = openedPartNumber;
   const previousBom = selectedBomPartNumber;
-  statusMessage = `Pulling latest ${productDataGithubBranch} from ${productDataGithubOwner}/${productDataGithubRepo}...`;
+  statusMessage = `Pulling latest ${productDataGithubBranch} from ${productDataRemoteLabel()}...`;
   renderApp();
   try {
     const response = await fetch(peakRunnerPullMainUrl, { method: "POST" });
@@ -353,6 +368,7 @@ async function pullMainFromRunner() {
     parts = sortParts(runnerPayload.parts);
     customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
     setProductDataFolderFromRunnerPayload(runnerPayload);
+    await syncRunnerConfigDisplay();
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
     selectedPartNumber = findPartByKey(previousSelected) ? previousSelected : partKey(parts[0]) || null;
@@ -466,7 +482,11 @@ async function readProductJson(directoryHandle, relativePath) {
 async function readJsonFromDirectory(directoryHandle, relativePath) {
   const fileHandle = await getFileHandleFromPath(directoryHandle, relativePath);
   const file = await fileHandle.getFile();
-  return JSON.parse(await file.text());
+  return parseJsonText(await file.text());
+}
+
+function parseJsonText(text) {
+  return JSON.parse(String(text).replace(/^\uFEFF/, ""));
 }
 
 async function writeJsonToDirectory(directoryHandle, relativePath, value) {
@@ -571,6 +591,7 @@ async function selectProductDataFolderFromDesktop() {
     parts = sortParts(runnerPayload.parts);
     customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
     setProductDataFolderFromRunnerPayload(runnerPayload);
+    await syncRunnerConfigDisplay();
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
     selectedPartNumber = partKey(parts[0]) || null;
@@ -736,6 +757,7 @@ function renderApp() {
   syncChrome();
   enableColumnResizing();
   enableBomColumnResizing();
+  enableBomColumnReordering();
   enablePaneResizing();
 }
 
@@ -1779,7 +1801,7 @@ function partEditorSelectRow(label, field, value, options, notes) {
 }
 
 function renderSettingsRows() {
-  const productDataFolderDisplay = productDataFolderName || "No folder selected";
+  const productDataFolderDisplay = productDataFolderName || "";
   const tabBar = `
     <tr class="settingsTabRow">
       <td colspan="10">
@@ -1805,21 +1827,16 @@ function renderSettingsRows() {
         <td>Product Data Folder</td>
         <td>
           <div class="folderPicker">
-            <input class="tableInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderDisplay)}" readonly>
+            <input class="tableInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderDisplay)}" placeholder="No folder selected" readonly>
             <button class="iconButton formAction" type="button" data-select-product-folder title="Select product data folder" aria-label="Select product data folder" data-icon="folder"></button>
           </div>
         </td>
         <td>Local Git folder containing manifest.json and parts/</td>
       </tr>
       <tr>
-        <td>Offline Mode</td>
-        <td><select class="tableInput" id="settingsOffline"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></td>
-        <td>PEAK remains usable without internet except GitHub sync</td>
-      </tr>
-      <tr>
         <td>Product Data Remote</td>
-        <td><input class="tableInput" value="${escapeHtml(productDataGithubUrl)}" readonly></td>
-        <td>Draft edits push through the local PEAK runner using this machine's Git credentials</td>
+        <td><input class="tableInput" id="settingsProductDataRemote" value="${escapeHtml(productDataRemote)}" placeholder="https://github.com/organization/Product-Data.git"></td>
+        <td>Required Git origin used for pull, push, and workflow operations</td>
       </tr>
       ${githubAuthSettingsRow()}
       <tr>
@@ -2812,7 +2829,7 @@ function revisionWorkflowRule(part, target) {
     return workflowRule([
       ["Current revision is Release Candidate", revisionStatusValue(part) === "release_candidate"],
       ["Previous revisions are at least Released", priorRevisionsAtLeast(part, target)],
-      ["Google Drive, Onshape, and WI links are present", allRequiredLinksPresent(part)]
+      ["Google Drive and Onshape links are present", allRequiredLinksPresent(part)]
     ]);
   }
   if (target === "obsolete") {
@@ -2881,7 +2898,7 @@ function partPropertiesComplete(part) {
 }
 
 function allRequiredLinksPresent(part) {
-  return ["drive", "onshape", "work"].every((kind) => Boolean(documentUrl(part, kind)));
+  return ["drive", "onshape"].every((kind) => Boolean(documentUrl(part, kind)));
 }
 
 function releasedRevisionsForPart(partNumber) {
@@ -3319,15 +3336,9 @@ function renderBomTree() {
   const childRows = renderBomChildren(rootPart, 1, new Set([partKey(rootPart)]));
   navigationTree.innerHTML = `
     <div class="bomGrid" role="treegrid" aria-label="BOM Structure">
-      <div class="bomHeader" role="row">
-        <span>Item<span class="bomResizeHandle" data-bom-resize-column="0" role="separator" aria-label="Resize item column"></span></span>
-        <span>Name<span class="bomResizeHandle" data-bom-resize-column="1" role="separator" aria-label="Resize name column"></span></span>
-        <span>Qty<span class="bomResizeHandle" data-bom-resize-column="2" role="separator" aria-label="Resize quantity column"></span></span>
-      </div>
+      ${renderBomHeader()}
       <button class="treeNode bomNode root${selectedBomPartNumber === partKey(rootPart) ? " active" : ""}" type="button" data-bom-part-number="${escapeHtml(partKey(rootPart))}" role="row">
-        <span class="bomItem">${escapeHtml(partObjectLabel(rootPart))}</span>
-        <span class="bomName">${escapeHtml(rootPart.name)}</span>
-        <span class="bomQty">1 each</span>
+        ${renderBomRowCells({ type: "root", part: rootPart })}
       </button>
       ${activePartEditMode && activeBomAddParent === partKey(rootPart) ? renderBomAddRow(rootPart) : ""}
       ${childRows || '<div class="treeEmpty">No child components</div>'}
@@ -3335,18 +3346,104 @@ function renderBomTree() {
   `;
 }
 
+function renderBomHeader() {
+  return `
+    <div class="bomHeader" role="row">
+      ${activeBomColumnOrder.map((key, index) => {
+        const column = bomColumnDefinitions[key];
+        return `<span class="bomHeaderCell" draggable="true" data-bom-column="${key}" title="Drag to reorder ${escapeHtml(column.label)} column">${escapeHtml(column.label)}<span class="bomResizeHandle" data-bom-resize-column="${index}" data-bom-resize-key="${key}" role="separator" aria-label="Resize ${escapeHtml(column.label)} column"></span></span>`;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderBomRowCells({ type, part, item, child, childId, toggle = "", editable = false }) {
+  return activeBomColumnOrder.map((key) => {
+    if (type === "add") {
+      if (key === "item") {
+        return `<div class="bomPartPicker"><input class="tableInput bomAddPartInput" data-bom-add-field="part" placeholder="Search part number or name" autocomplete="off" aria-label="Search for a component" aria-controls="bomPartSuggestions" aria-expanded="false"><div id="bomPartSuggestions" class="bomPartSuggestions" role="listbox" hidden></div></div>`;
+      }
+      if (key === "name") return '<span class="bomName" data-bom-add-preview="name">New component</span>';
+      if (key === "quantity") return '<input class="tableInput bomQtyInput" data-bom-add-field="quantity" type="number" min="0.001" step="any" value="1" aria-label="Component quantity">';
+      if (key === "revision") return '<span class="bomRevision" data-bom-add-preview="revision">—</span>';
+      return '<span class="bomStatus" data-bom-add-preview="status">—</span>';
+    }
+
+    if (key === "item") {
+      if (type === "root") return `<span class="bomItem">${escapeHtml(part.part_number)}</span>`;
+      return `<div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child?.part_number || item.child_part_number)}</button></div>`;
+    }
+    if (key === "name") return `<span class="bomName">${escapeHtml(part?.name || child?.name || "External component")}</span>`;
+    if (key === "quantity") {
+      if (type === "root") return '<span class="bomQty">1 each</span>';
+      return editable
+        ? `<input class="tableInput bomQtyInput" value="${escapeHtml(item.quantity)}" data-bom-qty="${escapeHtml(childId)}">`
+        : `<span class="bomQty">${escapeHtml(item.quantity)} ${escapeHtml(item.unit)}</span>`;
+    }
+    if (key === "revision") return `<span class="bomRevision">${escapeHtml(part?.revision || child?.revision || item?.child_revision || "—")}</span>`;
+    return `<span class="bomStatus">${escapeHtml(part ? releaseStatusLabel(part) : child ? releaseStatusLabel(child) : "Not found")}</span>`;
+  }).join("");
+}
+
 function renderBomAddRow(parentPart) {
   return `
     <div class="treeNode bomNode bomAddRow" data-bom-add-parent="${escapeHtml(partKey(parentPart))}" role="row">
-      <input class="tableInput bomAddPartInput" data-bom-add-field="part" placeholder="Part number or Part ID">
-      <span class="bomName">New component</span>
-      <div class="bomAddControls">
-        <input class="tableInput bomQtyInput" data-bom-add-field="quantity" type="number" min="0.001" step="any" value="1">
-        <button class="iconButton primaryAction bomAddSaveButton" type="button" data-save-bom-add>Save</button>
-        <button class="iconButton bomAddCancelButton" type="button" data-cancel-bom-add>Cancel</button>
-      </div>
+      ${renderBomRowCells({ type: "add" })}
     </div>
   `;
+}
+
+function bomPartSearchMatches(query) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const rootKey = partKey(getOpenedPart());
+  return sortParts(parts)
+    .filter((part) => partKey(part) !== rootKey)
+    .filter((part) => !normalizedQuery || matchesSearch(part, normalizedQuery))
+    .sort((a, b) => {
+      const aStarts = a.part_number?.toLowerCase().startsWith(normalizedQuery) ? 0 : 1;
+      const bStarts = b.part_number?.toLowerCase().startsWith(normalizedQuery) ? 0 : 1;
+      return aStarts - bStarts;
+    })
+    .slice(0, 10);
+}
+
+function updateBomPartSearchPopout(query) {
+  const input = document.querySelector('[data-bom-add-field="part"]');
+  const popout = document.querySelector("#bomPartSuggestions");
+  if (!input || !popout) {
+    return;
+  }
+  const matches = bomPartSearchMatches(query);
+  popout.innerHTML = matches.length
+    ? matches.map((part) => `
+        <button class="suggestionItem" type="button" role="option" data-select-bom-part="${escapeHtml(partKey(part))}">
+          <strong>${escapeHtml(part.part_number)}</strong>
+          <span>${escapeHtml(part.name || "Unnamed part")}</span>
+          <small>Rev ${escapeHtml(part.revision || "V1")} | ${escapeHtml(releaseStatusLabel(part))} | ${escapeHtml(part.project || "Unassigned project")}</small>
+        </button>
+      `).join("")
+    : '<p class="bomPartSearchEmpty">No matching parts</p>';
+  popout.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+}
+
+function selectBomPartSuggestion(identifier) {
+  const part = findPartByKey(identifier);
+  const row = document.querySelector("[data-bom-add-parent]");
+  const input = row?.querySelector('[data-bom-add-field="part"]');
+  if (!part || !row || !input) {
+    return;
+  }
+  input.value = partKey(part);
+  row.querySelector('[data-bom-add-preview="name"]').textContent = part.name || "Unnamed part";
+  row.querySelector('[data-bom-add-preview="revision"]').textContent = part.revision || "V1";
+  row.querySelector('[data-bom-add-preview="status"]').textContent = releaseStatusLabel(part);
+  const popout = row.querySelector("#bomPartSuggestions");
+  if (popout) {
+    popout.hidden = true;
+  }
+  input.setAttribute("aria-expanded", "false");
+  addBomFromForm(activeBomAddParent || openedPartNumber);
 }
 
 function renderBomChildren(parentPart, depth, visited) {
@@ -3370,16 +3467,12 @@ function renderBomChildren(parentPart, depth, visited) {
       const row = canEditThisItem
           ? `
           <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row" draggable="true">
-            <div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child ? partObjectLabel(child) : item.child_part_number)}</button></div>
-            <span class="bomName">${escapeHtml(child?.name ?? "External component")}</span>
-            <input class="tableInput bomQtyInput" value="${escapeHtml(item.quantity)}" data-bom-qty="${escapeHtml(childId)}">
+            ${renderBomRowCells({ type: "child", item, child, childId, toggle, editable: true })}
           </div>
         `
         : `
           <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row">
-            <div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child ? partObjectLabel(child) : item.child_part_number)}</button></div>
-            <span class="bomName">${escapeHtml(child?.name ?? "External component")}</span>
-            <span class="bomQty">${escapeHtml(item.quantity)} ${escapeHtml(item.unit)}</span>
+            ${renderBomRowCells({ type: "child", item, child, childId, toggle })}
           </div>
         `;
       return `${row}${children}`;
@@ -3497,6 +3590,9 @@ function openSelectedPart({ newTab = false, editMode = false } = {}) {
   activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
   activeNavMode = "part";
+  searchInput.value = "";
+  searchSuggestions.innerHTML = "";
+  searchSuggestions.classList.remove("visible");
   window.history.replaceState({}, "", url);
   renderApp();
 }
@@ -3517,6 +3613,9 @@ function moveToPart(partNumber, { editMode = false } = {}) {
   activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
   activeNavMode = "part";
+  searchInput.value = "";
+  searchSuggestions.innerHTML = "";
+  searchSuggestions.classList.remove("visible");
   window.history.replaceState({}, "", partUrl(objectId, { editMode }));
   renderApp();
 }
@@ -3547,11 +3646,17 @@ function syncChrome() {
   document.body.classList.toggle("searchMode", !isOpened);
   workspace.classList.toggle("homeWorkspace", isHomePane);
   workspace.classList.toggle("partWorkspace", isOpened);
-  workspace.classList.toggle("partReadOnlyWorkspace", isOpened);
+  workspace.classList.toggle("partReadOnlyWorkspace", isOpened && !activePartEditMode);
+  workspace.classList.toggle("partEditingWorkspace", isOpened && activePartEditMode);
   workspace.classList.toggle("singlePaneWorkspace", isSinglePane);
   workspace.classList.toggle("reportWorkspace", isReportPane);
   workspace.classList.toggle("projectWorkspace", isProjectPane);
   workspace.classList.toggle("tabularWorkspace", isTablePane);
+  if (isOpened) {
+    workspace.style.setProperty("--nav-width", `${activeBomPaneWidthRatio * 100}%`);
+  } else if (!isHomePane) {
+    workspace.style.removeProperty("--nav-width");
+  }
 
   navItems.forEach((button) => {
     button.classList.toggle("active", button.dataset.navMode === activeNavMode);
@@ -4067,8 +4172,8 @@ async function transitionRevisionWorkflow(part, target) {
     }
     await persistLocalChanges();
     statusMessage = target === "delete"
-      ? `${label} deleted locally; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`
-      : `${label} set to ${revisionStatusText(target)}; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+      ? `${label} deleted locally; pushing to ${productDataRemoteLabel()}.`
+      : `${label} set to ${revisionStatusText(target)}; pushing to ${productDataRemoteLabel()}.`;
     setWorkflowFeedback("revision", part, "running", `Pushing ${label} to main...`);
     files = productDataSnapshotFiles();
   } else {
@@ -4272,19 +4377,13 @@ async function copyPartDetails(part) {
 }
 
 navigationTree.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-save-bom-add], [data-cancel-bom-add], [data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
+  const button = event.target.closest("[data-select-bom-part], [data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
   if (!button) {
     return;
   }
 
-  if (button.dataset.saveBomAdd !== undefined) {
-    addBomFromForm(activeBomAddParent || openedPartNumber);
-    return;
-  }
-
-  if (button.dataset.cancelBomAdd !== undefined) {
-    activeBomAddParent = "";
-    renderApp();
+  if (button.dataset.selectBomPart) {
+    selectBomPartSuggestion(button.dataset.selectBomPart);
     return;
   }
 
@@ -4330,6 +4429,9 @@ navigationTree.addEventListener("click", (event) => {
   }
 
   if (button.dataset.bomPartNumber) {
+    if (event.target.closest("input, select, textarea")) {
+      return;
+    }
     if (preventPartNavigationDuringEdit(button.dataset.bomPartNumber)) {
       return;
     }
@@ -4363,9 +4465,43 @@ navigationTree.addEventListener("change", (event) => {
   updateBomQuantity(quantityInput.dataset.bomQty, quantityInput.value);
 });
 
+navigationTree.addEventListener("input", (event) => {
+  const partInput = event.target.closest('[data-bom-add-field="part"]');
+  if (partInput) {
+    updateBomPartSearchPopout(partInput.value);
+  }
+});
+
+navigationTree.addEventListener("focusin", (event) => {
+  const partInput = event.target.closest('[data-bom-add-field="part"]');
+  if (partInput) {
+    updateBomPartSearchPopout(partInput.value);
+  }
+});
+
+navigationTree.addEventListener("keydown", (event) => {
+  const partInput = event.target.closest('[data-bom-add-field="part"]');
+  if (!partInput) {
+    return;
+  }
+  if (event.key === "Escape") {
+    const popout = document.querySelector("#bomPartSuggestions");
+    if (popout) popout.hidden = true;
+    partInput.setAttribute("aria-expanded", "false");
+    return;
+  }
+  if (event.key === "Enter") {
+    const firstMatch = bomPartSearchMatches(partInput.value)[0];
+    if (firstMatch) {
+      event.preventDefault();
+      selectBomPartSuggestion(partKey(firstMatch));
+    }
+  }
+});
+
 navigationTree.addEventListener("dragstart", (event) => {
   const row = event.target.closest(".bomNode.child[draggable='true']");
-  if (!row || !activePartEditMode) {
+  if (!row || !activePartEditMode || event.target.closest("input, select, textarea")) {
     return;
   }
   row.classList.add("isDragging");
@@ -4412,6 +4548,12 @@ searchInput.addEventListener("focus", renderSearchSuggestions);
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".searchBox")) {
     searchSuggestions.classList.remove("visible");
+  }
+  if (!event.target.closest(".bomPartPicker")) {
+    const bomSuggestions = document.querySelector("#bomPartSuggestions");
+    const bomPartInput = document.querySelector('[data-bom-add-field="part"]');
+    if (bomSuggestions) bomSuggestions.hidden = true;
+    if (bomPartInput) bomPartInput.setAttribute("aria-expanded", "false");
   }
   if (!event.target.closest(".createFormDropWrap")) {
     const basedOnSuggestions = document.querySelector("#basedOnSuggestions");
@@ -4622,7 +4764,10 @@ partsList.addEventListener("click", (event) => {
 
   const saveSettingsButton = event.target.closest("[data-save-settings]");
   if (saveSettingsButton) {
-    saveSettingsFromForm();
+    saveSettingsFromForm().catch((error) => {
+      statusMessage = `Setup save failed: ${runnerErrorMessage(error)}`;
+      renderApp();
+    });
     return;
   }
 
@@ -4681,50 +4826,6 @@ partsList.addEventListener("click", (event) => {
   }
 
 });
-
-function initPaneResizing() {
-  document.querySelectorAll("[data-resize-pane]").forEach((handle) => {
-    handle.addEventListener("pointerdown", (event) => {
-      if (window.matchMedia("(max-width: 1120px)").matches) {
-        return;
-      }
-
-      event.preventDefault();
-      handle.setPointerCapture(event.pointerId);
-      document.body.classList.add("isResizing");
-
-      const pane = handle.dataset.resizePane;
-      const startX = event.clientX;
-      const styles = getComputedStyle(workspace);
-      const startNavWidth = parseFloat(styles.getPropertyValue("--nav-width")) || 250;
-      const startResultsWidth = document.querySelector(".resultsPane")?.getBoundingClientRect().width || 240;
-      const handleWidth = 12;
-
-      function onMove(moveEvent) {
-        const delta = moveEvent.clientX - startX;
-        const workspaceWidth = workspace.getBoundingClientRect().width;
-        if (pane === "navigator") {
-          const maxNavWidth = Math.max(0, workspaceWidth - startResultsWidth - handleWidth);
-          workspace.style.setProperty("--nav-width", `${clamp(startNavWidth + delta, 0, maxNavWidth)}px`);
-        } else {
-          const navWidth = document.querySelector(".navigatorPane")?.getBoundingClientRect().width || startNavWidth;
-          const maxResultsWidth = Math.max(0, workspaceWidth - navWidth - handleWidth);
-          workspace.style.setProperty("--results-width", `${clamp(startResultsWidth + delta, 0, maxResultsWidth)}px`);
-        }
-      }
-
-      function onUp(upEvent) {
-        handle.releasePointerCapture(upEvent.pointerId);
-        document.body.classList.remove("isResizing");
-        handle.removeEventListener("pointermove", onMove);
-        handle.removeEventListener("pointerup", onUp);
-      }
-
-      handle.addEventListener("pointermove", onMove);
-      handle.addEventListener("pointerup", onUp);
-    });
-  });
-}
 
 function enableColumnResizing() {
   const table = document.querySelector(".objectTable");
@@ -4798,7 +4899,8 @@ function enableBomColumnResizing() {
     return;
   }
   const saved = loadBomColumnWidths();
-  saved.forEach((width, index) => {
+  activeBomColumnOrder.forEach((key, index) => {
+    const width = saved[key] || bomColumnDefinitions[key].width;
     grid.style.setProperty(`--bom-col-${index + 1}`, `${width}px`);
   });
   handles.forEach((handle) => {
@@ -4826,11 +4928,49 @@ function enableBomColumnResizing() {
         document.body.classList.remove("isResizing");
         handle.removeEventListener("pointermove", onMove);
         handle.removeEventListener("pointerup", onUp);
-        saveBomColumnWidths(grid);
+        saveBomColumnWidth(handle.dataset.bomResizeKey, parseFloat(getComputedStyle(grid).getPropertyValue(`--bom-col-${index + 1}`)));
       }
 
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", onUp);
+    });
+  });
+}
+
+function enableBomColumnReordering() {
+  const headers = [...document.querySelectorAll("[data-bom-column]")];
+  headers.forEach((header) => {
+    if (header.dataset.reorderReady === "true") return;
+    header.dataset.reorderReady = "true";
+    header.addEventListener("dragstart", (event) => {
+      if (event.target.closest("[data-bom-resize-column]")) {
+        event.preventDefault();
+        return;
+      }
+      header.classList.add("isDragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/bom-column", header.dataset.bomColumn);
+    });
+    header.addEventListener("dragover", (event) => {
+      if (!Array.from(event.dataTransfer.types || []).includes("text/bom-column")) return;
+      event.preventDefault();
+      header.classList.add("isDropTarget");
+      event.dataTransfer.dropEffect = "move";
+    });
+    header.addEventListener("dragleave", () => header.classList.remove("isDropTarget"));
+    header.addEventListener("drop", (event) => {
+      const sourceKey = event.dataTransfer.getData("text/bom-column");
+      const targetKey = header.dataset.bomColumn;
+      if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+      event.preventDefault();
+      const nextOrder = activeBomColumnOrder.filter((key) => key !== sourceKey);
+      nextOrder.splice(nextOrder.indexOf(targetKey), 0, sourceKey);
+      activeBomColumnOrder = nextOrder;
+      localStorage.setItem("peakBomColumnOrder", JSON.stringify(activeBomColumnOrder));
+      renderApp();
+    });
+    header.addEventListener("dragend", () => {
+      document.querySelectorAll(".bomHeaderCell.isDragging, .bomHeaderCell.isDropTarget").forEach((cell) => cell.classList.remove("isDragging", "isDropTarget"));
     });
   });
 }
@@ -4864,10 +5004,18 @@ function enablePaneResizing() {
     return {
       onMove(e) {
         const workspaceWidth = workspace.getBoundingClientRect().width;
-        const maxWidth = workspace.classList.contains("homeWorkspace") && window.matchMedia("(max-width: 1120px)").matches
-          ? Math.max(160, workspaceWidth - 260)
-          : 600;
-        workspace.style.setProperty("--nav-width", `${clamp(startWidth + e.clientX - startX, 140, maxWidth)}px`);
+        const isPartWorkspace = workspace.classList.contains("partWorkspace");
+        const maxWidth = isPartWorkspace
+          ? workspaceWidth * 0.5
+          : workspace.classList.contains("homeWorkspace") && window.matchMedia("(max-width: 1120px)").matches
+            ? Math.max(160, workspaceWidth - 260)
+            : 600;
+        const width = clamp(startWidth + e.clientX - startX, 140, maxWidth);
+        workspace.style.setProperty("--nav-width", `${width}px`);
+        if (isPartWorkspace && workspaceWidth > 0) {
+          activeBomPaneWidthRatio = clamp(width / workspaceWidth, 0.1, 0.5);
+          localStorage.setItem("peakBomPaneWidthRatio", String(activeBomPaneWidthRatio));
+        }
       }
     };
   });
@@ -5065,7 +5213,7 @@ async function createProjectFromForm() {
   await persistLocalChanges();
   renderProjectOptions();
   activeCreateMode = "hub";
-  statusMessage = `Created project ${name}; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  statusMessage = `Created project ${name}; pushing to ${productDataRemoteLabel()}.`;
   renderApp();
   await pushProjectsToRunner(`Create project ${name}`, name);
 }
@@ -5152,7 +5300,7 @@ async function saveProjectValues(originalProject, values) {
   }
   await persistLocalChanges();
   renderProjectOptions();
-  statusMessage = `Saved project ${originalProject}; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  statusMessage = `Saved project ${originalProject}; pushing to ${productDataRemoteLabel()}.`;
   renderApp();
   await pushProjectsToRunner(`Update project ${originalProject}`, originalProject);
 }
@@ -5287,7 +5435,7 @@ async function saveOpenPartFromForm(originalPartNumber) {
   activePartEditMode = false;
   activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
-  statusMessage = `Saved ${partObjectLabel(part)} locally; pushing draft edit to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  statusMessage = `Saved ${partObjectLabel(part)} locally; pushing draft edit to ${productDataRemoteLabel()}.`;
   window.history.replaceState({}, "", partUrl(partKey(part)));
   renderProjectOptions();
   renderApp();
@@ -5346,7 +5494,7 @@ async function saveAttachmentsFromForm(originalPartNumber) {
   openedPartNumber = partKey(part);
   activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
-  statusMessage = `Saved attachments for ${partObjectLabel(part)} locally; pushing to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  statusMessage = `Saved attachments for ${partObjectLabel(part)} locally; pushing to ${productDataRemoteLabel()}.`;
   renderApp();
   await persistLocalChanges();
   await pushDraftPartChangesToRunner(part, { commitMessage: `Update attachments ${partObjectLabel(part)}` });
@@ -5534,11 +5682,30 @@ function showSyncAction(action) {
   renderApp();
 }
 
-function saveSettingsFromForm() {
+async function saveSettingsFromForm() {
   const configuredProductData = runnerProductDataDir || (productDataDirectoryHandle ? productDataFolderName : "");
-  statusMessage = configuredProductData
-    ? `Using product data folder ${configuredProductData}; remote ${productDataGithubOwner}/${productDataGithubRepo}`
-    : "Select a product data folder to load PEAK data";
+  if (!configuredProductData) {
+    statusMessage = "Select a product data folder before configuring its remote";
+    renderApp();
+    return;
+  }
+  const remote = document.querySelector("#settingsProductDataRemote")?.value.trim() || "";
+  if (!remote) {
+    statusMessage = "Enter the Product Data Remote before saving setup";
+    renderApp();
+    return;
+  }
+  const response = await fetch(peakRunnerConfigProductDataRemoteUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ remote })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.message || "Could not configure product data remote");
+  }
+  productDataRemote = payload.remote || remote;
+  statusMessage = `Using product data folder ${configuredProductData}; remote ${productDataRemote}`;
   renderApp();
 }
 
@@ -6322,7 +6489,7 @@ async function pushDraftPartChangesToRunner(part, { commitMessage = "" } = {}) {
     }
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
-    statusMessage = payload.message || `Saved ${label} and pushed product data to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+    statusMessage = payload.message || `Saved ${label} and pushed product data to ${productDataRemoteLabel()}.`;
   } catch (error) {
     hasRepoChanges = true;
     localStorage.setItem("peakHasLocalChanges", "true");
@@ -6349,7 +6516,7 @@ async function pushProjectsToRunner(commitMessage, projectName = "projects") {
     }
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
-    statusMessage = payload.message || `Pushed project changes to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+    statusMessage = payload.message || `Pushed project changes to ${productDataRemoteLabel()}.`;
   } catch (error) {
     hasRepoChanges = true;
     localStorage.setItem("peakHasLocalChanges", "true");
@@ -6359,7 +6526,7 @@ async function pushProjectsToRunner(commitMessage, projectName = "projects") {
 }
 
 async function pushTabularChangesToRunner() {
-  statusMessage = `Pushing tabular changes to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  statusMessage = `Pushing tabular changes to ${productDataRemoteLabel()}.`;
   renderApp();
   try {
     const response = await fetch(peakRunnerPushUrl, {
@@ -6377,7 +6544,7 @@ async function pushTabularChangesToRunner() {
     }
     hasRepoChanges = false;
     localStorage.setItem("peakHasLocalChanges", "false");
-    statusMessage = payload.message || `Pushed tabular changes to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+    statusMessage = payload.message || `Pushed tabular changes to ${productDataRemoteLabel()}.`;
   } catch (error) {
     hasRepoChanges = true;
     localStorage.setItem("peakHasLocalChanges", "true");
@@ -6430,7 +6597,7 @@ function workflowRunnerSuccessMessage(payload, title) {
   if (payload.prUrl) {
     return `Created GitHub merge request "${title}": ${payload.prUrl}`;
   }
-  return payload.message || `Workflow transition "${title}" pushed to ${productDataGithubOwner}/${productDataGithubRepo}.`;
+  return payload.message || `Workflow transition "${title}" pushed to ${productDataRemoteLabel()}.`;
 }
 
 function workflowRunnerInlineSuccessMessage(payload, mode, title) {
@@ -6535,17 +6702,32 @@ function removeUndefinedFields(value) {
 
 function loadBomColumnWidths() {
   try {
-    const widths = JSON.parse(localStorage.getItem("peakBomColumnWidths") || "[]");
-    return Array.isArray(widths) ? widths.filter((width) => Number.isFinite(width) && width > 0) : [];
+    const widths = JSON.parse(localStorage.getItem("peakBomColumnWidthsV3") || "{}");
+    return widths && typeof widths === "object" && !Array.isArray(widths) ? widths : {};
   } catch {
-    return [];
+    return {};
   }
 }
 
-function saveBomColumnWidths(grid) {
-  const styles = getComputedStyle(grid);
-  const widths = [1, 2, 3].map((index) => parseFloat(styles.getPropertyValue(`--bom-col-${index}`))).filter(Number.isFinite);
-  localStorage.setItem("peakBomColumnWidths", JSON.stringify(widths));
+function saveBomColumnWidth(key, width) {
+  if (!bomColumnDefinitions[key] || !Number.isFinite(width)) return;
+  localStorage.setItem("peakBomColumnWidthsV3", JSON.stringify({ ...loadBomColumnWidths(), [key]: width }));
+}
+
+function loadBomColumnOrder() {
+  try {
+    const order = JSON.parse(localStorage.getItem("peakBomColumnOrder") || "[]");
+    return Array.isArray(order) && order.length === bomDefaultColumnOrder.length && bomDefaultColumnOrder.every((key) => order.includes(key))
+      ? order
+      : [...bomDefaultColumnOrder];
+  } catch {
+    return [...bomDefaultColumnOrder];
+  }
+}
+
+function loadBomPaneWidthRatio() {
+  const ratio = Number(localStorage.getItem("peakBomPaneWidthRatio"));
+  return Number.isFinite(ratio) && ratio >= 0.1 && ratio <= 0.5 ? ratio : 0.25;
 }
 
 function loadProjects() {
@@ -6610,7 +6792,6 @@ objectTable.addEventListener("click", (event) => {
 
 loadParts()
   .then(() => {
-    initPaneResizing();
     renderApp();
   })
   .catch((error) => {

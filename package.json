@@ -1,7 +1,7 @@
 {
   "name": "peak-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "PEAK desktop product registry",
   "author": "Launch Canada",
   "type": "module",
@@ -26,6 +26,7 @@
   "build": {
     "appId": "ca.launchcanada.peak",
     "productName": "PEAK",
+    "artifactName": "PEAK-Setup-${version}.${ext}",
     "asarUnpack": [
       "app/**/*",
       "runner/**/*"

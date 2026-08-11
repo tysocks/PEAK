@@ -2,7 +2,6 @@ import { execFile, spawn } from "node:child_process";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -39,6 +38,11 @@ createServer(async (request, response) => {
     if (url.pathname === "/api/config/product-data-folder" && request.method === "POST") {
       const body = await readJsonBody(request);
       await sendJson(response, await saveProductDataFolder(body?.productDataDir || body?.path));
+      return;
+    }
+    if (url.pathname === "/api/config/product-data-remote" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      await sendJson(response, await saveProductDataRemote(body?.remote || body?.url));
       return;
     }
     if (url.pathname === "/api/git/status") {
@@ -82,30 +86,22 @@ createServer(async (request, response) => {
 
 function resolveProductDataDir() {
   const configured = process.env.PEAK_PRODUCT_DATA_DIR || readConfiguredProductDataDir();
-  if (configured) {
-    return path.resolve(configured);
-  }
-  return portableProductDataCandidates().find((candidate) => existsSync(path.join(candidate, "manifest.json"))) || "";
+  return configured ? path.resolve(configured) : "";
 }
 
 function readConfiguredProductDataDir() {
-  try {
-    if (!existsSync(configPath)) {
-      return "";
-    }
-    const config = JSON.parse(readFileSync(configPath, "utf8"));
-    return config.productDataDir || "";
-  } catch {
-    return "";
-  }
+  return readConfiguredSettings().productDataDir || "";
 }
 
-function portableProductDataCandidates() {
-  return [
-    path.join(repoRoot, "Product-Data"),
-    path.resolve(repoRoot, "..", "Product-Data"),
-    path.join(os.homedir(), "Documents", "Product-Data")
-  ];
+function readConfiguredSettings() {
+  try {
+    if (!existsSync(configPath)) {
+      return {};
+    }
+    return parseJsonText(readFileSync(configPath, "utf8"));
+  } catch {
+    return {};
+  }
 }
 
 async function pushDraft(body) {
@@ -184,7 +180,7 @@ async function createWorkflowPullRequest(body) {
     if (Array.isArray(body?.files) && body.files.length) {
       await writeProductDataFiles(body.files);
     }
-    const status = await commitAndPushCurrentBranch(title, { branch });
+    const status = await commitAndPushCurrentBranch(title, { branch, syncRemote: false });
     const prUrl = await createGitHubPullRequest({ branch, title, body });
     await runGit(["switch", baseBranch || "main"]).catch(() => runGit(["switch", "main"]));
     return {
@@ -210,11 +206,14 @@ async function requireCleanWorkingTree(action = "continue") {
 }
 
 async function runnerConfig() {
+  const remote = productDataDir && existsSync(path.join(productDataDir, ".git"))
+    ? (await runGit(["remote", "get-url", "origin"]).catch(() => "")).trim()
+    : "";
   return {
     ok: true,
     productDataDir,
+    remote,
     configured: Boolean(productDataDir),
-    candidates: portableProductDataCandidates(),
     configPath,
     message: productDataDir
       ? `Product data folder configured: ${productDataDir}`
@@ -239,6 +238,19 @@ async function saveProductDataFolder(value) {
     productDataDir,
     message: `Product data folder configured: ${productDataDir}`
   };
+}
+
+async function saveProductDataRemote(value) {
+  await assertProductDataRepo();
+  const remote = String(value || "").trim();
+  if (!remote) {
+    throw new Error("Product data remote is required.");
+  }
+  const hasOrigin = Boolean((await runGit(["remote"]).catch(() => "")).split(/\r?\n/).includes("origin"));
+  await runGit(hasOrigin ? ["remote", "set-url", "origin", remote] : ["remote", "add", "origin", remote]);
+  const config = { ...readConfiguredSettings(), productDataDir, productDataRemote: remote };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return { ok: true, productDataDir, remote, message: `Product data remote configured: ${remote}` };
 }
 
 function assertProductDataConfigured() {
@@ -335,7 +347,11 @@ async function deleteProductDataFiles(paths) {
 }
 
 async function readJsonFile(relativePath) {
-  return JSON.parse(await readFile(path.join(productDataDir, normalizeProductPath(relativePath)), "utf8"));
+  return parseJsonText(await readFile(path.join(productDataDir, normalizeProductPath(relativePath)), "utf8"));
+}
+
+function parseJsonText(text) {
+  return JSON.parse(String(text).replace(/^\uFEFF/, ""));
 }
 
 function normalizeProductPath(relativePath) {
@@ -410,16 +426,23 @@ async function assertProductDataRepo() {
   }
 }
 
-async function commitAndPushCurrentBranch(message, { branch } = {}) {
+async function commitAndPushCurrentBranch(message, { branch, syncRemote = true } = {}) {
   const status = await gitStatus();
   if (!status.configured) {
     throw new Error(status.message || "Product data Git repository is not configured");
   }
+  if (!status.remote) {
+    throw new Error("Product data remote is not configured. Set it in Settings > Setup before pushing.");
+  }
+  const targetBranch = branch || status.branch || "main";
   if (status.dirty) {
     await runGit(["add", "-A"]);
     await runGit(["commit", "-m", message]);
   }
-  await runGit(["push", "origin", branch || status.branch || "main"]);
+  if (syncRemote) {
+    await runGit(["pull", "--rebase", "origin", targetBranch]);
+  }
+  await runGit(["push", "origin", targetBranch]);
   return status;
 }
 
@@ -521,8 +544,6 @@ async function createGitHubPullRequest({ branch, title, body }) {
   const { stdout } = await execFileAsync("gh", [
     "pr",
     "create",
-    "--repo",
-    "Launch-Canada/Product-Data",
     "--base",
     "main",
     "--head",
@@ -610,7 +631,7 @@ async function readJsonBody(request) {
     chunks.push(chunk);
   }
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  return text ? parseJsonText(text) : {};
 }
 
 async function sendJson(response, value, status = 200) {

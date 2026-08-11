@@ -420,12 +420,17 @@ code {
 }
 
 .workspace.partWorkspace {
-  --nav-width: 350px;
+  --nav-width: 25%;
   grid-template-columns: var(--nav-width) 6px minmax(0, var(--results-width)) 6px minmax(0, 1fr);
 }
 
 .workspace.partReadOnlyWorkspace {
   grid-template-columns: var(--nav-width) 6px 0 0 minmax(0, 1fr);
+}
+
+.workspace.partEditingWorkspace {
+  --nav-width: 25%;
+  grid-template-columns: min(var(--nav-width), 50%) 6px 0 0 minmax(360px, 1fr);
 }
 
 /* ── Panes ── */
@@ -539,6 +544,8 @@ code {
 .tabularWorkspace .resizeHandleLeft,
 .partReadOnlyWorkspace .resultsPane,
 .partReadOnlyWorkspace .resizeHandleRight,
+.partEditingWorkspace .resultsPane,
+.partEditingWorkspace .resizeHandleRight,
 .reportWorkspace .propertiesPane,
 .reportWorkspace .resizeHandleRight {
   display: none;
@@ -683,16 +690,20 @@ code {
 
 /* ── BOM grid ── */
 .bomGrid {
-  --bom-col-1: minmax(92px, 1fr);
-  --bom-col-2: minmax(118px, 1.25fr);
-  --bom-col-3: 72px;
+  --bom-col-1: 150px;
+  --bom-col-2: 180px;
+  --bom-col-3: 80px;
+  --bom-col-4: 65px;
+  --bom-col-5: 110px;
+  width: max-content;
+  min-width: 100%;
   padding: 0 6px 8px;
 }
 
 .bomHeader,
 .bomNode {
   display: grid;
-  grid-template-columns: var(--bom-col-1) var(--bom-col-2) var(--bom-col-3);
+  grid-template-columns: var(--bom-col-1) var(--bom-col-2) var(--bom-col-3) var(--bom-col-4) var(--bom-col-5);
   align-items: stretch;
   width: 100%;
   min-height: 34px;
@@ -710,6 +721,20 @@ code {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.bomHeaderCell {
+  cursor: grab;
+  user-select: none;
+}
+
+.bomHeaderCell.isDragging {
+  opacity: 0.45;
+}
+
+.bomHeaderCell.isDropTarget {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .bomHeader > span,
@@ -785,6 +810,17 @@ code {
   font-size: 11px;
 }
 
+.bomRevision,
+.bomStatus {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.bomRevision {
+  justify-content: center;
+  font-family: "JetBrains Mono", monospace;
+}
+
 .bomNode .linkButton {
   min-width: 0;
   border: none;
@@ -858,13 +894,43 @@ code {
   margin: 3px 4px;
 }
 
-.bomAddControls {
-  display: grid;
-  grid-template-columns: minmax(56px, 1fr) auto auto;
-  gap: 4px;
-  align-items: center;
+.bomPartPicker {
+  position: relative;
   min-width: 0;
-  padding: 0 4px;
+  border-right: 1px solid var(--border);
+}
+
+.bomPartSuggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 4px;
+  z-index: 30;
+  width: max(300px, calc(100% + 160px));
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-popup);
+  box-shadow: var(--shadow);
+}
+
+.bomPartSuggestions[hidden] {
+  display: none;
+}
+
+.bomPartSuggestions .suggestionItem {
+  grid-template-columns: minmax(92px, auto) minmax(0, 1fr);
+}
+
+.bomPartSuggestions .suggestionItem small {
+  grid-column: 1 / -1;
+}
+
+.bomPartSearchEmpty {
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .treeEmpty {
@@ -2598,6 +2664,12 @@ body[data-accent="orange"] {
     grid-template-rows: minmax(0, 1fr);
   }
 
+  .workspace.partEditingWorkspace {
+    --nav-width: 25%;
+    grid-template-columns: min(var(--nav-width), 50%) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
   .workspace.singlePaneWorkspace {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -2666,7 +2738,8 @@ body[data-accent="orange"] {
     min-width: 0;
   }
 
-  .workspace.partReadOnlyWorkspace .propertiesPane {
+  .workspace.partReadOnlyWorkspace .propertiesPane,
+  .workspace.partEditingWorkspace .propertiesPane {
     grid-column: 2;
     grid-row: 1;
     max-height: none;
@@ -2704,6 +2777,10 @@ body[data-accent="orange"] {
   .workspace.partWorkspace,
   .workspace.partReadOnlyWorkspace {
     --nav-width: 160px;
+  }
+
+  .workspace.partEditingWorkspace {
+    --nav-width: 25%;
   }
 
   .treeNode {
@@ -2775,7 +2852,8 @@ body[data-accent="orange"] {
 
   .workspace,
   .workspace.partWorkspace,
-  .workspace.partReadOnlyWorkspace {
+  .workspace.partReadOnlyWorkspace,
+  .workspace.partEditingWorkspace {
     grid-template-columns: 1fr;
   }
 
@@ -2810,7 +2888,8 @@ body[data-accent="orange"] {
     grid-area: details;
   }
 
-  .workspace.partReadOnlyWorkspace .propertiesPane {
+  .workspace.partReadOnlyWorkspace .propertiesPane,
+  .workspace.partEditingWorkspace .propertiesPane {
     grid-column: 1 / -1;
     max-height: none;
     border-left: none;
