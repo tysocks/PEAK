@@ -37,7 +37,7 @@ function startRunner() {
 
 async function createWindow() {
   startRunner();
-  const preloadPath = path.join(app.getAppPath(), "electron", "preload.mjs");
+  const preloadPath = path.join(app.getAppPath(), "electron", "preload.cjs");
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -54,6 +54,9 @@ async function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
+  });
+  mainWindow.webContents.on("preload-error", (_event, failedPreloadPath, error) => {
+    console.error(`PEAK preload failed (${failedPreloadPath}):`, error);
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (!url.startsWith(appUrl)) {

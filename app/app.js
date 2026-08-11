@@ -543,6 +543,11 @@ async function selectProductDataFolder() {
     await selectProductDataFolderFromDesktop();
     return;
   }
+  if (navigator.userAgent.includes("Electron")) {
+    statusMessage = "PEAK's desktop folder picker is unavailable. Restart PEAK or install the latest release.";
+    renderApp();
+    return;
+  }
   if (!("showDirectoryPicker" in window)) {
     statusMessage = "This browser does not support selecting local folders. Open PEAK in a Chromium browser.";
     renderApp();
