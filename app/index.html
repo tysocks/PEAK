@@ -3,87 +3,238 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>PEAK Registry</title>
+    <title>PEAK</title>
+    <link rel="stylesheet" href="theme.css">
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
-    <main class="tcShell">
-      <aside class="globalNav" aria-label="Application navigation">
-        <button class="navItem active" type="button" title="Search" aria-label="Search" data-nav-mode="home" data-icon="search"></button>
-        <button class="navItem" type="button" title="Create" aria-label="Create" data-nav-mode="create" data-icon="create"></button>
-        <button class="navItem" type="button" title="Projects" aria-label="Projects" data-nav-mode="projects" data-icon="projects"></button>
-        <button class="navItem" type="button" title="History" aria-label="History" data-nav-mode="history" data-icon="history"><span id="repoBadge" class="navBadge" hidden></span></button>
-        <button class="navItem" type="button" title="Table" aria-label="Table" data-nav-mode="table" data-icon="table"></button>
-        <button class="navItem" type="button" title="Report" aria-label="Report" data-nav-mode="report" data-icon="report"></button>
-        <button class="navItem navBottom" type="button" title="Settings" aria-label="Settings" data-nav-mode="settings" data-icon="settings"></button>
-      </aside>
-
-      <section class="mainArea">
-        <header class="commandBar">
-          <div class="workspaceTitle">
-            <p class="eyebrow">1 -> Parts, lifecycle, evidence</p>
-            <h1 id="workspaceHeading">Search</h1>
-            <p id="recordCount">Loading records</p>
-          </div>
-          <div class="commandTools" aria-label="Search and filters">
-            <div class="searchBox">
-              <input id="searchInput" type="search" placeholder="Search by ID, name, owner, tag" autocomplete="off">
-              <div id="searchSuggestions" class="searchSuggestions" role="listbox"></div>
+    <main class="app" id="peakApp">
+      <aside class="sidebar open" id="appSidebar" aria-label="Application navigation">
+        <div class="sidebarInner">
+          <div class="sidebarTopActions" aria-label="Quick actions">
+            <div class="sidebarTopLeft">
+              <button class="sidebarAction sidebarModeAction" type="button" data-sidebar-action="home" title="Home">
+                <span class="sidebarActionIcon" data-icon="home"></span>
+                <span class="sidebarActionLabel">Home</span>
+              </button>
+              <button class="sidebarAction sidebarModeAction" type="button" data-sidebar-action="inbox" title="Inbox">
+                <span class="sidebarActionIcon" data-icon="inbox"></span>
+                <span class="sidebarActionLabel">Inbox</span>
+              </button>
             </div>
-            <select id="stateFilter" aria-label="Lifecycle state">
-              <option value="">All states</option>
-              <option value="draft">Draft</option>
-              <option value="release_candidate">Release Candidate</option>
-              <option value="released">Released</option>
-              <option value="obsolete">Obsolete</option>
-            </select>
-            <select id="projectFilter" aria-label="Project">
-              <option value="">All projects</option>
-            </select>
+            <div class="sidebarTopRight">
+              <button class="sidebarAction sidebarToolAction" type="button" data-sidebar-action="create" title="Create">
+                <span class="sidebarActionIcon" data-icon="create"></span>
+              </button>
+              <button class="sidebarAction sidebarToolAction" type="button" data-sidebar-action="search" title="Search">
+                <span class="sidebarActionIcon" data-icon="search"></span>
+              </button>
+            </div>
           </div>
+
+          <div class="sidebarScroll" id="sidebarScroll">
+            <div id="sidebarHomeView" class="sidebarView">
+              <section class="sidebarSection" id="favoritesSection">
+                <div class="sidebarSectionHeader">
+                  <h3>Favorites</h3>
+                </div>
+                <div id="favoritesList" class="sidebarList"></div>
+              </section>
+
+              <section class="sidebarSection" id="projectsTreeSection">
+                <div class="sidebarSectionHeader">
+                  <h3>Projects</h3>
+                </div>
+                <div id="projectsTree" class="sidebarList"></div>
+              </section>
+            </div>
+
+            <div id="sidebarInboxView" class="sidebarView" hidden>
+              <section class="sidebarSection">
+                <div class="sidebarSectionHeader">
+                  <h3>Inbox</h3>
+                </div>
+                <div id="inboxList" class="sidebarList"></div>
+              </section>
+            </div>
+          </div>
+
+          <div class="sidebarLibrary" aria-label="Library">
+            <button class="sidebarLibraryItem" type="button" data-open-tab="projects">
+              <span class="sidebarActionIcon" data-icon="projects"></span>
+              <span>Projects</span>
+            </button>
+            <button class="sidebarLibraryItem" type="button" data-open-tab="history">
+              <span class="sidebarActionIcon" data-icon="history"></span>
+              <span>History</span>
+              <span id="repoBadge" class="navBadge" hidden></span>
+            </button>
+            <button class="sidebarLibraryItem" type="button" data-open-tab="table">
+              <span class="sidebarActionIcon" data-icon="table"></span>
+              <span>Table</span>
+            </button>
+            <button class="sidebarLibraryItem" type="button" data-open-tab="report">
+              <span class="sidebarActionIcon" data-icon="report"></span>
+              <span>Report</span>
+            </button>
+            <button class="sidebarLibraryItem" type="button" data-open-tab="settings">
+              <span class="sidebarActionIcon" data-icon="settings"></span>
+              <span>Settings</span>
+            </button>
+          </div>
+        </div>
+      </aside>
+      <div class="sidebarResizer" id="sidebarResizer" role="separator" aria-label="Resize sidebar" tabindex="0"></div>
+
+      <section class="main">
+        <header class="tabBar" aria-label="Workspace tabs">
+          <div class="tabBarLeading">
+            <button class="sidebarToggle" id="sidebarToggle" type="button" title="Toggle sidebar" aria-label="Toggle sidebar"></button>
+            <div class="tabHistoryNav" aria-label="Tab history">
+              <button class="tabHistoryBtn" id="navBackBtn" type="button" title="Back" aria-label="Back" disabled></button>
+              <button class="tabHistoryBtn" id="navForwardBtn" type="button" title="Forward" aria-label="Forward" disabled></button>
+            </div>
+          </div>
+          <div class="tabList" id="tabList" role="tablist"></div>
+          <button class="tabAddBtn" id="tabSearchAdd" type="button" title="Search" aria-label="Open search">+</button>
+          <div class="tabBarDragSpace" aria-hidden="true"></div>
         </header>
 
-        <section class="workspace">
-          <aside class="navigatorPane" aria-label="Navigation">
-            <div class="paneHeader">
-              <h2 id="navigatorTitle">Navigator</h2>
+        <div class="workspaceHost" id="workspaceHost" data-split="false">
+          <div id="splitDropOverlay" class="splitDropOverlay" hidden>
+            <div class="splitDropZone" data-split-side="left"><span>Split left</span></div>
+            <div class="splitDropZone" data-split-side="right"><span>Split right</span></div>
+          </div>
+          <section class="workspacePane primaryPane" data-pane="primary">
+            <div class="canvasHeader" hidden>
+              <div class="canvasTitleBlock">
+                <h1 id="workspaceHeading">Home</h1>
+                <p id="pageDescription" class="pageDescription eyebrow"></p>
+              </div>
             </div>
-            <div id="navigationTree" class="navigationTree"></div>
-          </aside>
-          <div class="resizeHandle resizeHandleLeft" role="separator" aria-label="Resize navigator" tabindex="0" data-resize-pane="navigator"></div>
+            <section class="workspace">
+              <aside class="navigatorPane" aria-label="Navigation" hidden>
+                <div class="paneHeader"><h2 id="navigatorTitle">Navigator</h2></div>
+                <div id="navigationTree" class="navigationTree" hidden></div>
+              </aside>
+              <div class="resizeHandle resizeHandleLeft" role="separator" aria-label="Resize navigator" tabindex="0" data-resize-pane="navigator"></div>
 
-          <section class="resultsPane" aria-label="Objects">
-            <div class="paneHeader resultsHeader">
-              <h2 id="resultsTitle">Objects</h2>
-            </div>
-            <div class="tableWrap">
-              <table class="objectTable">
-                <thead id="tableHead">
-                  <tr>
-                    <th scope="col">Object</th>
-                    <th scope="col">Name</th>
-                    <th scope="col">Revision</th>
-                    <th scope="col">State</th>
-                    <th scope="col">Owner</th>
-                    <th scope="col">Last Modified</th>
-                  </tr>
-                </thead>
-                <tbody id="partsList"></tbody>
-              </table>
+              <section class="resultsPane" aria-label="Objects">
+                <div class="paneHeader resultsHeader">
+                  <h2 id="resultsTitle">Objects</h2>
+                </div>
+                <div class="tableWrap">
+                  <table class="objectTable">
+                    <thead id="tableHead"></thead>
+                    <tbody id="partsList"></tbody>
+                  </table>
+                </div>
+              </section>
+              <div class="resizeHandle resizeHandleRight" role="separator" aria-label="Resize properties" tabindex="0" data-resize-pane="properties"></div>
+
+              <aside class="propertiesPane" aria-label="Properties">
+                <div id="partDetail" aria-live="polite"></div>
+              </aside>
+            </section>
+          </section>
+
+          <div class="splitResizer" id="splitResizer" hidden></div>
+
+          <section class="workspacePane secondaryPane" data-pane="secondary" hidden>
+            <div class="splitEmpty">
+              <p>Drag a tab left or right to split the workspace.</p>
             </div>
           </section>
-          <div class="resizeHandle resizeHandleRight" role="separator" aria-label="Resize properties" tabindex="0" data-resize-pane="properties"></div>
-
-          <aside class="propertiesPane" aria-label="Properties">
-            <div id="partDetail" aria-live="polite"></div>
-          </aside>
-        </section>
+        </div>
       </section>
     </main>
+
+    <span id="recordCount" hidden aria-hidden="true"></span>
+
+    <div id="createModal" class="peakModal" hidden>
+      <div class="peakModalBackdrop" data-close-modal="create"></div>
+      <div class="peakModalDialog createModalDialog" role="dialog" aria-modal="true" aria-labelledby="createModalTitle">
+        <header class="peakModalHeader">
+          <h2 id="createModalTitle">Create</h2>
+          <button class="peakModalClose" type="button" data-close-modal="create" aria-label="Close">×</button>
+        </header>
+        <div class="peakModalBody" id="createModalBody"></div>
+      </div>
+    </div>
+
+    <div id="searchModal" class="peakModal" hidden>
+      <div class="peakModalBackdrop" data-close-modal="search"></div>
+      <div class="peakModalDialog searchModalDialog" role="dialog" aria-label="Search">
+        <div class="peakModalBody searchModalBody">
+          <div class="searchModalTop">
+            <span class="searchModalSearchIcon" aria-hidden="true"></span>
+            <input id="searchInput" type="search" placeholder="Search parts…" autocomplete="off">
+            <div id="searchSuggestions" class="searchSuggestions" role="listbox"></div>
+            <div class="searchModalTopActions">
+              <button class="searchChromeBtn searchChromeIcon" type="button" id="searchFiltersToggle" aria-pressed="true" title="Filters" data-icon="filter" aria-label="Filters"></button>
+              <button class="searchChromeBtn searchChromeIcon" type="button" id="searchPreviewToggle" aria-pressed="true" title="Preview" data-icon="preview" aria-label="Preview"></button>
+            </div>
+          </div>
+
+          <div class="searchModalChipRow" id="searchFilterChips">
+            <button class="searchChip" type="button" id="searchTitleOnly" aria-pressed="false">Title only</button>
+            <button class="searchChip searchChipSelect" type="button" data-filter-picker="createdBy" id="searchCreatedByChip">
+              <span>Created by</span>
+              <strong id="searchCreatedByLabel" hidden></strong>
+            </button>
+            <button class="searchChip searchChipSelect" type="button" data-filter-picker="in" id="searchInChip">
+              <span>In</span>
+              <strong id="searchInLabel" hidden></strong>
+            </button>
+            <button class="searchChip searchChipSelect" type="button" data-filter-picker="project" id="searchProjectChip">
+              <span>Project</span>
+              <strong id="searchProjectLabel" hidden></strong>
+            </button>
+          </div>
+
+          <div class="searchModalSplit" id="searchModalSplit">
+            <div class="notionScroll searchModalListScroll" data-notion-scroll>
+              <button class="notionScrollChevron up" type="button" data-scroll-dir="-1" hidden aria-label="Scroll up"></button>
+              <div class="searchModalList notionScrollViewport" id="searchModalList"></div>
+              <button class="notionScrollChevron down" type="button" data-scroll-dir="1" hidden aria-label="Scroll down"></button>
+            </div>
+            <div class="searchModalPreviewPane">
+              <div class="notionScroll searchModalPreviewScroll" data-notion-scroll>
+                <button class="notionScrollChevron up" type="button" data-scroll-dir="-1" hidden aria-label="Scroll up"></button>
+                <div class="searchModalPreview notionScrollViewport" id="searchModalPreview"></div>
+                <button class="notionScrollChevron down" type="button" data-scroll-dir="1" hidden aria-label="Scroll down"></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="searchFilterPicker" class="searchFilterPicker" hidden>
+      <input id="searchFilterPickerQuery" type="search" placeholder="Filter…" autocomplete="off">
+      <div class="notionScroll" data-notion-scroll>
+        <button class="notionScrollChevron up" type="button" data-scroll-dir="-1" hidden aria-label="Scroll up"></button>
+        <div id="searchFilterPickerList" class="searchFilterPickerList notionScrollViewport"></div>
+        <button class="notionScrollChevron down" type="button" data-scroll-dir="1" hidden aria-label="Scroll down"></button>
+      </div>
+    </div>
+
+    <select id="stateFilter" hidden aria-hidden="true">
+      <option value="">All states</option>
+      <option value="draft">Draft</option>
+      <option value="release_candidate">Release Candidate</option>
+      <option value="released">Released</option>
+      <option value="obsolete">Obsolete</option>
+    </select>
+    <select id="projectFilter" hidden aria-hidden="true">
+      <option value="">All projects</option>
+    </select>
+
     <div id="partContextMenu" class="contextMenu" role="menu" hidden>
       <button type="button" role="menuitem" data-context-action="open">Open</button>
       <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
       <button type="button" role="menuitem" data-context-action="edit">Edit</button>
+      <button type="button" role="menuitem" data-context-action="favorite">Favorite</button>
     </div>
     <input id="csvImportFile" type="file" accept=".csv,text/csv" hidden>
 

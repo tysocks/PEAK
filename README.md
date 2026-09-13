@@ -4,21 +4,19 @@ PEAK is a lightweight desktop product registry for hardware teams. It manages
 projects, parts, revisions, lifecycle status, linked engineering records, BOMs,
 history, and Git-backed product-data workflows.
 
-PEAK 1.0 is a Windows Electron application. The desktop shell starts a local
-runner that reads and writes a separate Product-Data Git checkout and performs
-Git operations using the current Windows user's configured credentials.
+PEAK 2.0 is a Windows Electron application with a Notion-style UI. The desktop
+shell starts a local runner that reads and writes a separate Product-Data Git
+checkout and performs Git operations using the current Windows user's configured
+credentials.
 
 ## Release files
 
-Download PEAK 1.0.1 from the [GitHub release page](https://github.com/Launch-Canada/PEAK/releases/tag/v1.0.1).
-
-Installer SHA-256: `AC95DF00729BC7EA2ED95D0B093EB40DDB890917F96C9759CED2E05A6FDAE5EF`
-
-PEAK 1.0.1 fixes Product Data folder selection in the sandboxed Electron desktop application.
+Build PEAK 2.0.0 locally with `npm run dist`, or download from the
+[GitHub releases page](https://github.com/Launch-Canada/PEAK/releases) when published.
 
 The Windows release contains:
 
-- `PEAK-Setup-1.0.1.exe` — interactive per-user installer.
+- `PEAK-Setup-2.0.0.exe` — interactive per-user installer.
 - `win-unpacked/PEAK.exe` — unpacked application for release verification.
 
 The installer creates Start Menu and desktop shortcuts and allows the user to
@@ -36,7 +34,7 @@ Windows SmartScreen may show an unrecognized-publisher warning.
 ## Installation
 
 1. Close any running copy of PEAK.
-2. Run `PEAK-Setup-1.0.1.exe`.
+2. Run `PEAK-Setup-2.0.0.exe`.
 3. If Windows SmartScreen appears, verify the installer came from the expected
    release source, select **More info**, then **Run anyway**.
 4. Choose the installation directory and complete installation.
@@ -216,7 +214,7 @@ requires a freshly cloned data repository.
 
 ### D. Install and verify clean first run
 
-1. Run the new `PEAK-Setup-1.0.1.exe` installer.
+1. Run the new `PEAK-Setup-2.0.0.exe` installer.
 2. Start PEAK.
 3. Open **Settings > Setup** before selecting anything.
 4. Confirm:

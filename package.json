@@ -1,7 +1,7 @@
 {
   "name": "peak-desktop",
   "private": true,
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "PEAK desktop product registry",
   "author": "Launch Canada",
   "type": "module",

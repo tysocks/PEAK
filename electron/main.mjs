@@ -44,7 +44,18 @@ async function createWindow() {
     minWidth: 960,
     minHeight: 720,
     title: "PEAK",
-    backgroundColor: "#0f141d",
+    backgroundColor: "#191919",
+    autoHideMenuBar: true,
+    titleBarStyle: "hidden",
+    ...(process.platform === "darwin"
+      ? { trafficLightPosition: { x: 14, y: 12 } }
+      : {
+          titleBarOverlay: {
+            color: "#202020",
+            symbolColor: "#ffffff",
+            height: 40
+          }
+        }),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -88,39 +99,8 @@ async function waitForRunner() {
 }
 
 function createMenu() {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    {
-      label: "File",
-      submenu: [
-        { role: "reload" },
-        { type: "separator" },
-        { role: "quit" }
-      ]
-    },
-    {
-      label: "Edit",
-      submenu: [
-        { role: "undo" },
-        { role: "redo" },
-        { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "selectAll" }
-      ]
-    },
-    {
-      label: "View",
-      submenu: [
-        { role: "toggleDevTools" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
-        { type: "separator" },
-        { role: "togglefullscreen" }
-      ]
-    }
-  ]));
+  // Hide the native File/Edit/View ribbon; keep DevTools via Ctrl+Shift+I when needed.
+  Menu.setApplicationMenu(null);
 }
 
 function errorPage(error) {

@@ -6,16 +6,49 @@ const partsList = document.querySelector("#partsList");
 const partDetail = document.querySelector("#partDetail");
 const recordCount = document.querySelector("#recordCount");
 const workspaceHeading = document.querySelector("#workspaceHeading");
+const pageDescriptionEl = document.querySelector("#pageDescription");
 const navigationTree = document.querySelector("#navigationTree");
 const navigatorTitle = document.querySelector("#navigatorTitle");
+const appSidebar = document.querySelector("#appSidebar");
+const appRoot = document.querySelector("#peakApp") || document.querySelector(".app");
 const tableHead = document.querySelector("#tableHead");
 const objectTable = document.querySelector(".objectTable");
 const resultsTitle = document.querySelector("#resultsTitle");
 const workspace = document.querySelector(".workspace");
-const navItems = document.querySelectorAll("[data-nav-mode]");
+const navigatorPane = document.querySelector(".navigatorPane");
+const tabListEl = document.querySelector("#tabList");
+const workspaceHost = document.querySelector("#workspaceHost");
+const secondaryPane = document.querySelector(".secondaryPane");
+const splitResizer = document.querySelector("#splitResizer");
+const favoritesListEl = document.querySelector("#favoritesList");
+const projectsTreeEl = document.querySelector("#projectsTree");
+const inboxListEl = document.querySelector("#inboxList");
+const sidebarHomeView = document.querySelector("#sidebarHomeView");
+const sidebarInboxView = document.querySelector("#sidebarInboxView");
+const createModal = document.querySelector("#createModal");
+const createModalBody = document.querySelector("#createModalBody");
+const searchModal = document.querySelector("#searchModal");
+const searchModalList = document.querySelector("#searchModalList");
+const searchModalPreview = document.querySelector("#searchModalPreview");
+const searchModalSplit = document.querySelector("#searchModalSplit");
+const searchFilterChips = document.querySelector("#searchFilterChips");
+const searchFiltersToggle = document.querySelector("#searchFiltersToggle");
+const searchPreviewToggle = document.querySelector("#searchPreviewToggle");
+const searchTitleOnlyBtn = document.querySelector("#searchTitleOnly");
+const searchCreatedByLabel = document.querySelector("#searchCreatedByLabel");
+const searchInLabel = document.querySelector("#searchInLabel");
+const searchProjectLabel = document.querySelector("#searchProjectLabel");
+const searchFilterPicker = document.querySelector("#searchFilterPicker");
+const searchFilterPickerQuery = document.querySelector("#searchFilterPickerQuery");
+const searchFilterPickerList = document.querySelector("#searchFilterPickerList");
 const repoBadge = document.querySelector("#repoBadge");
 const partContextMenu = document.querySelector("#partContextMenu");
 const csvImportFile = document.querySelector("#csvImportFile");
+const navItems = document.querySelectorAll("[data-nav-mode]");
+
+if (navigator.userAgent.includes("Electron")) {
+  document.documentElement.classList.add("peak-electron");
+}
 
 let parts = [];
 let selectedPartNumber = null;
@@ -29,6 +62,7 @@ let activeProjectEditMode = false;
 let activeCreateMode = "hub";
 let activeResultView = "grid";
 let activePropertyTab = "overview";
+let partAsidePanel = null; // "info" | "options" | null
 let activeAttachmentDraftCount = 0;
 let activeTableSort = { column: "part_number", direction: "asc" };
 let tableColumnFilters = {};
@@ -38,18 +72,20 @@ let collapsedBomNodes = new Set();
 let activeBomAddParent = "";
 let activeBomPaneWidthRatio = loadBomPaneWidthRatio();
 const bomColumnDefinitions = {
-  item: { label: "Item", width: 150 },
+  item: { label: "Item", width: 260 },
   name: { label: "Name", width: 180 },
-  quantity: { label: "Qty", width: 80 },
-  revision: { label: "Rev", width: 65 },
+  quantity: { label: "Qty", width: 48 },
+  revision: { label: "Rev", width: 44 },
   status: { label: "Status", width: 110 }
 };
 const bomDefaultColumnOrder = ["item", "name", "quantity", "revision", "status"];
 let activeBomColumnOrder = loadBomColumnOrder();
 let activeSettingsTab = "setup";
 let activeColorScheme = localStorage.getItem("peakColorScheme") || "dark";
-let activeAccentColor = localStorage.getItem("peakAccentColor") || "teal";
-let activeAccentCustomHex = localStorage.getItem("peakAccentCustomHex") || "#35d1a8";
+let activeFontFamily = localStorage.getItem("peakFontFamily") || "inter";
+let activeFontSize = Number(localStorage.getItem("peakFontSize") || "14") || 14;
+let activeAccentColor = "notion";
+let activeAccentCustomHex = "#6f6f6f";
 let statusMessage = "";
 let workflowFeedback = {};
 let githubAuthStatus = null;
@@ -62,6 +98,28 @@ let productDataDirectoryHandle = null;
 let productDataFolderName = localStorage.getItem("peakProductDataFolderName") || "";
 let runnerProductDataDir = "";
 let productDataRemote = "";
+
+let workspaceTabs = [];
+let activeTabId = null;
+let secondaryTabId = null;
+let splitViewEnabled = false;
+let sidebarOpen = localStorage.getItem("peakSidebarOpen") !== "0";
+let sidebarMode = "home";
+let favoritePartKeys = loadFavorites();
+let collapsedProjectFolders = loadCollapsedProjects();
+let searchModalSelection = null;
+let searchFiltersVisible = true;
+let searchPreviewVisible = true;
+let searchTitleOnly = false;
+let searchCreatedBy = "";
+let searchInBomRoot = "";
+let searchProject = "";
+let searchFilterPickerType = null;
+let nextTabSeq = 1;
+let tabHistory = [];
+let tabHistoryIndex = -1;
+let tabHistoryLock = false;
+let tabDragId = null;
 
 const productDataDbName = "peakProductData";
 const productDataStoreName = "handles";
@@ -80,15 +138,9 @@ function productDataRemoteLabel() {
   return productDataRemote || "configured product data remote";
 }
 
-const accentPresets = [
-  { id: "teal", name: "Teal", color: "#35d1a8" },
-  { id: "emerald", name: "Emerald", color: "#10b981" },
-  { id: "sky", name: "Sky", color: "#38bdf8" },
-  { id: "cyan", name: "Cyan", color: "#06b6d4" },
-  { id: "violet", name: "Violet", color: "#a78bfa" },
-  { id: "rose", name: "Rose", color: "#f472b6" },
-  { id: "amber", name: "Amber", color: "#fbbf24" },
-  { id: "orange", name: "Orange", color: "#f97316" }
+const fontFamilyOptions = [
+  { id: "inter", label: "Inter", stack: '"Inter", system-ui, -apple-system, "Segoe UI", sans-serif' },
+  { id: "dmsans", label: "DM Sans", stack: '"DM Sans", "Inter", system-ui, sans-serif' }
 ];
 
 const tabularColumns = [
@@ -131,40 +183,791 @@ const historyColumns = [
 const revisionWorkflowStates = ["draft", "release_candidate", "released", "obsolete"];
 const maturityWorkflowStates = ["development", "npi", "production", "sunset", "obsolete"];
 
-function applyAppearance(scheme, accent) {
-  document.body.classList.toggle("lightMode", scheme === "light");
-  document.body.setAttribute("data-accent", accent);
-  if (accent === "custom") {
-    applyCustomAccentLive(activeAccentCustomHex);
-  } else {
-    document.body.style.removeProperty("--accent");
-    document.body.style.removeProperty("--accent-soft");
-    document.body.style.removeProperty("--selected");
+function applyAppearance(scheme) {
+  const mode = scheme === "light" ? "light" : "dark";
+  document.documentElement.classList.toggle("light-mode", mode === "light");
+  document.body.classList.toggle("lightMode", mode === "light");
+  const font = fontFamilyOptions.find((item) => item.id === activeFontFamily) || fontFamilyOptions[0];
+  document.documentElement.style.setProperty("--peak-font-family", font.stack);
+  document.documentElement.style.setProperty("--peak-base-font-size", `${clamp(activeFontSize, 10, 24)}px`);
+  document.body.style.removeProperty("--accent");
+  document.body.style.removeProperty("--accent-soft");
+  document.body.style.removeProperty("--selected");
+}
+
+applyAppearance(activeColorScheme);
+
+function loadFavorites() {
+  try {
+    const values = JSON.parse(localStorage.getItem("peakFavorites") || "[]");
+    return Array.isArray(values) ? values.map(String) : [];
+  } catch {
+    return [];
   }
 }
 
-function applyCustomAccentLive(hex) {
-  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  document.body.style.setProperty("--accent", hex);
-  document.body.style.setProperty("--accent-soft", `rgba(${r}, ${g}, ${b}, 0.12)`);
-  document.body.style.setProperty("--selected", `rgba(${r}, ${g}, ${b}, 0.12)`);
-  const rField = document.querySelector("#accentR");
-  const gField = document.querySelector("#accentG");
-  const bField = document.querySelector("#accentB");
-  if (rField) rField.value = r;
-  if (gField) gField.value = g;
-  if (bField) bField.value = b;
+function saveFavorites() {
+  localStorage.setItem("peakFavorites", JSON.stringify(favoritePartKeys));
 }
 
-function currentAccentHex() {
-  if (activeAccentColor === "custom") return activeAccentCustomHex;
-  return accentPresets.find((p) => p.id === activeAccentColor)?.color || "#35d1a8";
+function loadCollapsedProjects() {
+  try {
+    const values = JSON.parse(localStorage.getItem("peakCollapsedProjects") || "null");
+    if (Array.isArray(values)) {
+      return new Set(values.map(String));
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
-applyAppearance(activeColorScheme, activeAccentColor);
+function saveCollapsedProjects() {
+  localStorage.setItem("peakCollapsedProjects", JSON.stringify([...collapsedProjectFolders]));
+}
+
+function newTabId(prefix = "tab") {
+  nextTabSeq += 1;
+  return `${prefix}-${Date.now()}-${nextTabSeq}`;
+}
+
+function tabTitleFor(type, payload = {}) {
+  if (type === "part") {
+    const part = findPartByKey(payload.objectId);
+    return part ? `${part.part_number}^${part.revision || "A"}` : payload.objectId || "Part";
+  }
+  const titles = {
+    home: "Browse",
+    projects: "Projects",
+    history: "History",
+    table: "Table",
+    report: "Report",
+    settings: "Settings"
+  };
+  return titles[type] || "Tab";
+}
+
+function findTab(id) {
+  return workspaceTabs.find((tab) => tab.id === id);
+}
+
+function findTabByType(type, objectId = "") {
+  return workspaceTabs.find((tab) => {
+    if (tab.type !== type) return false;
+    if (type === "part") return tab.payload?.objectId === objectId;
+    return true;
+  });
+}
+
+function openWorkspaceTab(type, payload = {}, { activate = true, forceNew = false } = {}) {
+  let tab = forceNew ? null : findTabByType(type, payload.objectId || "");
+  if (!tab) {
+    tab = {
+      id: newTabId(type),
+      type,
+      title: tabTitleFor(type, payload),
+      payload: { ...payload }
+    };
+    workspaceTabs.push(tab);
+  } else {
+    tab.payload = { ...tab.payload, ...payload };
+    tab.title = tabTitleFor(type, tab.payload);
+  }
+  if (activate) {
+    activateWorkspaceTab(tab.id);
+  } else {
+    renderTabBar();
+  }
+  return tab;
+}
+
+function pushTabHistory(tabId) {
+  if (tabHistoryLock || !tabId) return;
+  if (tabHistory[tabHistoryIndex] === tabId) {
+    syncTabHistoryButtons();
+    return;
+  }
+  tabHistory = tabHistory.slice(0, tabHistoryIndex + 1);
+  tabHistory.push(tabId);
+  if (tabHistory.length > 100) {
+    tabHistory = tabHistory.slice(-100);
+  }
+  tabHistoryIndex = tabHistory.length - 1;
+  syncTabHistoryButtons();
+}
+
+function pruneTabHistory(closedTabId) {
+  if (!closedTabId) return;
+  const currentId = tabHistory[tabHistoryIndex];
+  tabHistory = tabHistory.filter((id) => id !== closedTabId);
+  if (!tabHistory.length) {
+    tabHistoryIndex = -1;
+  } else {
+    const nextIndex = tabHistory.lastIndexOf(currentId);
+    tabHistoryIndex = nextIndex >= 0 ? nextIndex : tabHistory.length - 1;
+  }
+  syncTabHistoryButtons();
+}
+
+function syncTabHistoryButtons() {
+  const backBtn = document.querySelector("#navBackBtn");
+  const forwardBtn = document.querySelector("#navForwardBtn");
+  if (backBtn) backBtn.disabled = tabHistoryIndex <= 0;
+  if (forwardBtn) forwardBtn.disabled = tabHistoryIndex < 0 || tabHistoryIndex >= tabHistory.length - 1;
+}
+
+function navigateTabHistory(delta) {
+  let nextIndex = tabHistoryIndex + delta;
+  while (nextIndex >= 0 && nextIndex < tabHistory.length && !findTab(tabHistory[nextIndex])) {
+    nextIndex += delta;
+  }
+  if (nextIndex < 0 || nextIndex >= tabHistory.length) {
+    tabHistory = tabHistory.filter((id) => Boolean(findTab(id)));
+    tabHistoryIndex = Math.min(Math.max(tabHistoryIndex, 0), tabHistory.length - 1);
+    syncTabHistoryButtons();
+    return;
+  }
+  const targetId = tabHistory[nextIndex];
+  tabHistoryLock = true;
+  tabHistoryIndex = nextIndex;
+  activateWorkspaceTab(targetId, { skipHistory: true });
+  tabHistoryLock = false;
+  syncTabHistoryButtons();
+}
+
+function activateWorkspaceTab(tabId, { skipHistory = false } = {}) {
+  const tab = findTab(tabId);
+  if (!tab) return;
+  activeTabId = tabId;
+  if (!skipHistory) {
+    pushTabHistory(tabId);
+  } else {
+    syncTabHistoryButtons();
+  }
+  applyTabToWorkspace(tab);
+  renderTabBar();
+  renderSidebarChrome();
+  renderApp();
+}
+
+function closeWorkspaceTab(tabId) {
+  const index = workspaceTabs.findIndex((tab) => tab.id === tabId);
+  if (index < 0) return;
+  const wasActive = activeTabId === tabId;
+  const historyBackId = wasActive && tabHistoryIndex > 0 ? tabHistory[tabHistoryIndex - 1] : null;
+  workspaceTabs.splice(index, 1);
+  pruneTabHistory(tabId);
+  if (secondaryTabId === tabId) {
+    secondaryTabId = null;
+    splitViewEnabled = false;
+  }
+  if (secondaryTabId && !findTab(secondaryTabId)) {
+    secondaryTabId = null;
+    splitViewEnabled = false;
+  }
+  if (workspaceTabs.length < 2) {
+    splitViewEnabled = false;
+    secondaryTabId = null;
+  }
+  if (!workspaceTabs.length) {
+    activeTabId = null;
+    openedPartNumber = null;
+    selectedBomPartNumber = null;
+    activeNavMode = "";
+    renderEmptyWorkspace();
+    renderTabBar();
+    renderSidebarChrome();
+    syncChrome();
+    syncTabHistoryButtons();
+    return;
+  }
+  if (wasActive) {
+    const next = (historyBackId && findTab(historyBackId))
+      || workspaceTabs[Math.max(0, index - 1)]
+      || workspaceTabs[0];
+    activateWorkspaceTab(next.id);
+    return;
+  }
+  renderTabBar();
+  renderSidebarChrome();
+}
+
+function renderEmptyWorkspace() {
+  document.title = "PEAK";
+  if (recordCount) recordCount.textContent = "No open tabs";
+  if (workspaceHeading) workspaceHeading.textContent = "PEAK";
+  if (pageDescriptionEl) pageDescriptionEl.textContent = "Open a part from the sidebar, or use Projects, History, Table, or Report.";
+  if (tableHead) tableHead.innerHTML = "";
+  if (partsList) {
+    partsList.innerHTML = `<tr><td class="emptyCell" colspan="6">No tab open. Choose an item from the sidebar.</td></tr>`;
+  }
+  if (partDetail) partDetail.innerHTML = "";
+  if (navigationTree) navigationTree.innerHTML = "";
+}
+
+function applyTabToWorkspace(tab) {
+  activeNavMode = tab.type === "part" ? "part" : tab.type;
+  if (tab.type === "part") {
+    const objectId = tab.payload?.objectId || "";
+    openedPartNumber = objectId;
+    selectedPartNumber = objectId;
+    selectedBomPartNumber = objectId;
+    activePartEditMode = Boolean(tab.payload?.editMode);
+    activeAttachmentEditMode = false;
+    activeAttachmentDraftCount = 0;
+  } else {
+    openedPartNumber = null;
+    selectedBomPartNumber = null;
+    activePartEditMode = false;
+    activeAttachmentEditMode = false;
+  }
+  if (tab.type === "projects" && tab.payload?.projectName) {
+    selectedProjectName = tab.payload.projectName;
+  }
+}
+
+function renderTabBar() {
+  if (!tabListEl) return;
+  tabListEl.innerHTML = workspaceTabs.map((tab) => `
+    <div class="workspaceTab${tab.id === activeTabId ? " active" : ""}${splitViewEnabled && tab.id === secondaryTabId ? " is-secondary" : ""}" role="tab" aria-selected="${tab.id === activeTabId}" data-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}" draggable="true">
+      <span class="workspaceTabTitle">${escapeHtml(tab.title)}</span>
+      <button class="workspaceTabClose" type="button" data-close-tab="${escapeHtml(tab.id)}" title="Close" aria-label="Close ${escapeHtml(tab.title)}">×</button>
+    </div>
+  `).join("");
+  if (workspaceHost) {
+    workspaceHost.dataset.split = splitViewEnabled ? "true" : "false";
+  }
+  if (secondaryPane) {
+    secondaryPane.hidden = !splitViewEnabled;
+    if (!splitViewEnabled) {
+      secondaryPane.setAttribute("hidden", "");
+      secondaryPane.style.display = "none";
+    } else {
+      secondaryPane.style.removeProperty("display");
+    }
+  }
+  if (splitResizer) {
+    splitResizer.hidden = !splitViewEnabled;
+    if (!splitViewEnabled) {
+      splitResizer.setAttribute("hidden", "");
+      splitResizer.style.display = "none";
+    } else {
+      splitResizer.style.removeProperty("display");
+    }
+  }
+  if (splitViewEnabled && secondaryPane) {
+    const secondary = findTab(secondaryTabId) || workspaceTabs.find((tab) => tab.id !== activeTabId);
+    secondaryTabId = secondary?.id || null;
+    secondaryPane.innerHTML = secondary
+      ? `
+        <div class="splitPaneHeader">
+          <h3>${escapeHtml(secondary.title)}</h3>
+          <div class="tabBarLeading">
+            <button class="tabBarBtn" type="button" data-focus-tab="${escapeHtml(secondary.id)}">Focus</button>
+            <button class="tabBarBtn" type="button" data-unsplit-view="1">Unsplit</button>
+          </div>
+        </div>
+        <div class="splitPaneBody">
+          <p>This tab is open on the right. Focus it to edit, or drag another tab left/right to change the split.</p>
+        </div>
+      `
+      : `<div class="splitEmpty"><p>Open another tab, then drag it left or right to split.</p></div>`;
+  }
+}
+
+function showSplitDropOverlay(show) {
+  const overlay = document.querySelector("#splitDropOverlay");
+  if (!overlay) return;
+  overlay.hidden = !show;
+  overlay.classList.toggle("is-active", Boolean(show));
+  if (!show) {
+    overlay.querySelectorAll(".splitDropZone").forEach((zone) => zone.classList.remove("is-target"));
+  }
+}
+
+function applyTabSplit(draggedId, side) {
+  if (!draggedId || workspaceTabs.length < 2) return;
+  const other = workspaceTabs.find((tab) => tab.id !== draggedId);
+  if (!other) return;
+  splitViewEnabled = true;
+  if (side === "left") {
+    secondaryTabId = activeTabId === draggedId ? other.id : (activeTabId || other.id);
+    if (secondaryTabId === draggedId) {
+      secondaryTabId = other.id;
+    }
+    activateWorkspaceTab(draggedId);
+    return;
+  }
+  if (activeTabId === draggedId) {
+    secondaryTabId = draggedId;
+    activateWorkspaceTab(other.id);
+    return;
+  }
+  secondaryTabId = draggedId;
+  renderTabBar();
+}
+
+function clearSplitView() {
+  splitViewEnabled = false;
+  secondaryTabId = null;
+  showSplitDropOverlay(false);
+  renderTabBar();
+}
+
+function reorderWorkspaceTab(draggedId, targetId, placeAfter = false) {
+  if (!draggedId || !targetId || draggedId === targetId) return;
+  const from = workspaceTabs.findIndex((tab) => tab.id === draggedId);
+  const to = workspaceTabs.findIndex((tab) => tab.id === targetId);
+  if (from < 0 || to < 0) return;
+  const [moved] = workspaceTabs.splice(from, 1);
+  let insertAt = workspaceTabs.findIndex((tab) => tab.id === targetId);
+  if (placeAfter) insertAt += 1;
+  workspaceTabs.splice(insertAt, 0, moved);
+  renderTabBar();
+}
+
+function setSidebarOpen(open) {
+  sidebarOpen = Boolean(open);
+  localStorage.setItem("peakSidebarOpen", sidebarOpen ? "1" : "0");
+  appSidebar?.classList.toggle("open", sidebarOpen);
+  appRoot?.classList.toggle("sidebar-collapsed", !sidebarOpen);
+}
+
+function renderSidebarChrome() {
+  document.querySelectorAll("[data-sidebar-action]").forEach((button) => {
+    const action = button.dataset.sidebarAction;
+    const isMode = action === "home" || action === "inbox";
+    button.classList.toggle("active", isMode && action === sidebarMode);
+  });
+  document.querySelectorAll("[data-open-tab]").forEach((button) => {
+    button.classList.toggle("active", activeNavMode === button.dataset.openTab);
+  });
+  if (sidebarHomeView) sidebarHomeView.hidden = sidebarMode !== "home";
+  if (sidebarInboxView) sidebarInboxView.hidden = sidebarMode !== "inbox";
+  renderFavoritesList();
+  renderProjectsTree();
+  renderInboxList();
+}
+
+function renderFavoritesList() {
+  if (!favoritesListEl) return;
+  const items = favoritePartKeys
+    .map((key) => findPartByKey(key))
+    .filter(Boolean);
+  if (!items.length) {
+    favoritesListEl.innerHTML = `<p class="sidebarEmpty">Pin parts from the context menu.</p>`;
+    return;
+  }
+  favoritesListEl.innerHTML = items.map((part) => {
+    const key = partKey(part);
+    const active = activeNavMode === "part" && openedPartNumber === key;
+    return `
+      <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-part="${escapeHtml(key)}">
+        <span class="sidebarItemLabel">${escapeHtml(part.part_number)} · ${escapeHtml(part.name)}</span>
+      </button>
+    `;
+  }).join("");
+}
+
+function projectBomForest(projectName) {
+  const groups = groupedPartResults(parts.filter((part) => part.project === projectName));
+  const byPartNumber = new Map(groups.map((group) => [group.part_number, group.representative]));
+  const childMap = new Map();
+  const referencedAsChild = new Set();
+
+  for (const group of groups) {
+    const part = group.representative;
+    const childNumbers = [];
+    for (const item of asArray(part.bom)) {
+      const childPn = String(item?.child_part_number || "").trim();
+      if (!childPn || !byPartNumber.has(childPn) || childPn === group.part_number) {
+        continue;
+      }
+      referencedAsChild.add(childPn);
+      if (!childNumbers.includes(childPn)) {
+        childNumbers.push(childPn);
+      }
+    }
+    childMap.set(group.part_number, childNumbers);
+  }
+
+  const roots = groups
+    .map((group) => group.part_number)
+    .filter((partNumber) => !referencedAsChild.has(partNumber));
+
+  return { byPartNumber, childMap, roots };
+}
+
+function renderProjectBomNode(partNumber, forest, depth, visited) {
+  const part = forest.byPartNumber.get(partNumber);
+  if (!part) {
+    return "";
+  }
+  const key = partKey(part);
+  const active = activeNavMode === "part" && openedPartNumber === key;
+  const children = forest.childMap.get(partNumber) || [];
+  const nextVisited = new Set(visited);
+  nextVisited.add(partNumber);
+  const childHtml = children
+    .filter((childPn) => !nextVisited.has(childPn))
+    .map((childPn) => renderProjectBomNode(childPn, forest, depth + 1, nextVisited))
+    .join("");
+  return `
+    <div class="sidebarBomNode" style="padding-left:${depth * 14}px">
+      <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-part="${escapeHtml(key)}">
+        <span class="sidebarItemLabel">${escapeHtml(part.part_number)} · ${escapeHtml(part.name)}</span>
+      </button>
+      ${childHtml}
+    </div>
+  `;
+}
+
+function renderProjectsTree() {
+  if (!projectsTreeEl) return;
+  if (collapsedProjectFolders === null) {
+    collapsedProjectFolders = new Set(projects());
+    saveCollapsedProjects();
+  }
+  const names = projects();
+  if (!names.length) {
+    projectsTreeEl.innerHTML = `<p class="sidebarEmpty">No projects yet.</p>`;
+    return;
+  }
+  projectsTreeEl.innerHTML = names.map((project) => {
+    const expanded = !collapsedProjectFolders.has(project);
+    const forest = projectBomForest(project);
+    const rootCount = forest.roots.length;
+    return `
+      <div class="sidebarProject">
+        <button class="sidebarItem${expanded ? " expanded" : ""}" type="button" data-toggle-project="${escapeHtml(project)}">
+          <span class="twist" aria-hidden="true"></span>
+          <span class="sidebarItemLabel">${escapeHtml(project)}</span>
+          <span class="sidebarItemMeta">${rootCount}</span>
+        </button>
+        <div class="sidebarChildren${expanded ? " open" : ""}">
+          ${forest.roots.length
+            ? forest.roots.map((partNumber) => renderProjectBomNode(partNumber, forest, 0, new Set())).join("")
+            : `<p class="sidebarEmpty">No parts</p>`}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function inboxItems() {
+  const me = (localStorage.getItem("peakDefaultOwner") || "").trim().toLowerCase();
+  return parts.filter((part) => {
+    const owner = String(part.owner || part.updated_by || part.created_by || "").trim().toLowerCase();
+    const approvers = asArray(part.approvers).map((item) => String(item?.name || item || "").trim().toLowerCase());
+    const involvesMe = me && (owner === me || approvers.includes(me));
+    const needsAction = ["draft", "release_candidate"].includes(revisionStatusValue(part));
+    return involvesMe && needsAction;
+  }).slice(0, 80);
+}
+
+function renderInboxList() {
+  if (!inboxListEl) return;
+  const items = inboxItems();
+  if (!items.length) {
+    inboxListEl.innerHTML = `<p class="sidebarEmpty">No actions assigned to you.</p>`;
+    return;
+  }
+  inboxListEl.innerHTML = items.map((part) => {
+    const key = partKey(part);
+    return `
+      <button class="sidebarItem" type="button" data-open-part="${escapeHtml(key)}">
+        <span class="sidebarItemLabel">${escapeHtml(part.part_number)}^${escapeHtml(part.revision || "A")} · ${escapeHtml(releaseStatusLabel(part))}</span>
+      </button>
+    `;
+  }).join("");
+}
+
+function toggleFavorite(partKeyValue) {
+  const key = String(partKeyValue || "");
+  if (!key) return;
+  if (favoritePartKeys.includes(key)) {
+    favoritePartKeys = favoritePartKeys.filter((item) => item !== key);
+  } else {
+    favoritePartKeys = [key, ...favoritePartKeys];
+  }
+  saveFavorites();
+  renderFavoritesList();
+}
+
+function openCreateModal(mode = "hub") {
+  activeCreateMode = mode;
+  if (!createModal || !createModalBody) return;
+  createModal.hidden = false;
+  renderCreateModalBody();
+}
+
+function closeCreateModal() {
+  if (createModal) createModal.hidden = true;
+}
+
+function renderCreateModalBody() {
+  if (!createModalBody) return;
+  // Reuse create renderers by temporarily painting into a detached host via partsList swap.
+  const previous = partsList.innerHTML;
+  const previousHead = tableHead.innerHTML;
+  renderCreateRows();
+  createModalBody.innerHTML = partsList.innerHTML;
+  partsList.innerHTML = previous;
+  tableHead.innerHTML = previousHead;
+  // Create rows render table cells; unwrap to modal content.
+  const cell = createModalBody.querySelector("td");
+  if (cell) {
+    createModalBody.innerHTML = cell.innerHTML;
+  }
+}
+
+function openSearchModal() {
+  if (!searchModal) return;
+  searchModal.hidden = false;
+  syncSearchModalChrome();
+  searchInput?.focus();
+  renderSearchModalResults();
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function closeSearchModal() {
+  if (searchModal) searchModal.hidden = true;
+  closeSearchFilterPicker();
+}
+
+function setChipValue(labelEl, chipEl, value) {
+  if (!labelEl || !chipEl) return;
+  const hasValue = Boolean(value);
+  chipEl.classList.toggle("is-active", hasValue);
+  if (hasValue) {
+    labelEl.hidden = false;
+    labelEl.textContent = value;
+  } else {
+    labelEl.hidden = true;
+    labelEl.textContent = "";
+  }
+}
+
+function syncSearchModalChrome() {
+  if (searchFiltersToggle) searchFiltersToggle.setAttribute("aria-pressed", String(searchFiltersVisible));
+  if (searchPreviewToggle) searchPreviewToggle.setAttribute("aria-pressed", String(searchPreviewVisible));
+  if (searchFilterChips) searchFilterChips.hidden = !searchFiltersVisible;
+  if (searchModalSplit) searchModalSplit.classList.toggle("preview-hidden", !searchPreviewVisible);
+  if (searchTitleOnlyBtn) {
+    searchTitleOnlyBtn.setAttribute("aria-pressed", String(searchTitleOnly));
+    searchTitleOnlyBtn.classList.toggle("is-active", searchTitleOnly);
+  }
+  setChipValue(searchCreatedByLabel, document.querySelector("#searchCreatedByChip"), searchCreatedBy);
+  const inPart = searchInBomRoot ? findPartByKey(searchInBomRoot) : null;
+  const inLabel = inPart
+    ? `${inPart.part_number}^${inPart.revision || "A"}`
+    : "";
+  setChipValue(searchInLabel, document.querySelector("#searchInChip"), inLabel);
+  setChipValue(searchProjectLabel, document.querySelector("#searchProjectChip"), searchProject);
+}
+
+function searchCreatorOptions() {
+  const names = new Set();
+  parts.forEach((part) => {
+    const name = String(createdBy(part) || "").trim();
+    if (name && name !== "Not set") names.add(name);
+  });
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+function searchInBomOptions() {
+  return groupedPartResults(parts).map((group) => {
+    const part = group.representative;
+    return {
+      value: partKey(part),
+      label: `${part.part_number}^${part.revision || "A"} · ${part.name}`
+    };
+  });
+}
+
+function searchProjectOptions() {
+  return projects();
+}
+
+function bomSubtreePartNumbers(rootPart) {
+  const allowed = new Set();
+  const visit = (part) => {
+    if (!part) return;
+    const pn = String(part.part_number || "").trim();
+    if (!pn || allowed.has(pn)) return;
+    allowed.add(pn);
+    for (const item of asArray(part.bom)) {
+      const child = resolveBomChild(item);
+      if (child) {
+        visit(child);
+      } else {
+        const childPn = String(item?.child_part_number || "").trim();
+        if (childPn) allowed.add(childPn);
+      }
+    }
+  };
+  visit(rootPart);
+  return allowed;
+}
+
+function closeSearchFilterPicker() {
+  searchFilterPickerType = null;
+  if (searchFilterPicker) searchFilterPicker.hidden = true;
+  if (searchFilterPickerQuery) searchFilterPickerQuery.value = "";
+}
+
+function openSearchFilterPicker(type, anchor) {
+  if (!searchFilterPicker || !anchor) return;
+  if (searchFilterPickerType === type && !searchFilterPicker.hidden) {
+    closeSearchFilterPicker();
+    return;
+  }
+  searchFilterPickerType = type;
+  searchFilterPicker.hidden = false;
+  if (searchFilterPickerQuery) {
+    searchFilterPickerQuery.value = "";
+    searchFilterPickerQuery.placeholder = type === "createdBy"
+      ? "Filter people…"
+      : type === "project"
+        ? "Filter projects…"
+        : "Filter assemblies…";
+  }
+  renderSearchFilterPickerOptions();
+  const rect = anchor.getBoundingClientRect();
+  const width = 260;
+  const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left));
+  const top = Math.min(window.innerHeight - 20, rect.bottom + 6);
+  searchFilterPicker.style.left = `${left}px`;
+  searchFilterPicker.style.top = `${top}px`;
+  searchFilterPickerQuery?.focus();
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function renderSearchFilterPickerOptions() {
+  if (!searchFilterPickerList || !searchFilterPickerType) return;
+  const query = String(searchFilterPickerQuery?.value || "").trim().toLowerCase();
+  let options = [];
+  if (searchFilterPickerType === "createdBy") {
+    options = searchCreatorOptions().map((name) => ({ value: name, label: name }));
+  } else if (searchFilterPickerType === "in") {
+    options = searchInBomOptions();
+  } else if (searchFilterPickerType === "project") {
+    options = searchProjectOptions().map((name) => ({
+      value: name,
+      label: name
+    }));
+  }
+  const filtered = options.filter((option) => !query || option.label.toLowerCase().includes(query));
+  const selectedValue = searchFilterPickerType === "createdBy"
+    ? searchCreatedBy
+    : searchFilterPickerType === "in"
+      ? searchInBomRoot
+      : searchProject;
+  searchFilterPickerList.innerHTML = filtered.length
+    ? filtered.map((option) => `
+        <button class="searchFilterOption${option.value === selectedValue ? " active" : ""}" type="button" data-search-filter-value="${escapeHtml(option.value)}">
+          ${escapeHtml(option.label)}
+        </button>
+      `).join("")
+    : `<p class="sidebarEmpty">No matches</p>`;
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function applySearchFilterPickerValue(value) {
+  if (searchFilterPickerType === "createdBy") {
+    searchCreatedBy = searchCreatedBy === value ? "" : value;
+  } else if (searchFilterPickerType === "in") {
+    searchInBomRoot = searchInBomRoot === value ? "" : value;
+  } else if (searchFilterPickerType === "project") {
+    searchProject = searchProject === value ? "" : value;
+  }
+  closeSearchFilterPicker();
+  syncSearchModalChrome();
+  renderSearchModalResults();
+}
+
+function searchModalFilteredParts() {
+  const query = searchInput?.value.trim() || "";
+  const bomRoot = searchInBomRoot ? findPartByKey(searchInBomRoot) : null;
+  const bomAllowed = bomRoot ? bomSubtreePartNumbers(bomRoot) : null;
+  return parts.filter((part) => {
+    if (!matchesSearch(part, query, { titleOnly: searchTitleOnly })) return false;
+    if (searchCreatedBy && createdBy(part) !== searchCreatedBy) return false;
+    if (searchProject && part.project !== searchProject) return false;
+    if (bomAllowed && !bomAllowed.has(part.part_number)) return false;
+    return true;
+  });
+}
+
+function bindNotionScroll(root) {
+  if (!root) return;
+  const viewport = root.querySelector(".notionScrollViewport");
+  const up = root.querySelector(".notionScrollChevron.up");
+  const down = root.querySelector(".notionScrollChevron.down");
+  if (!viewport || !up || !down) return;
+  const sync = () => {
+    const max = viewport.scrollHeight - viewport.clientHeight;
+    const canScroll = max > 4;
+    up.hidden = !canScroll || viewport.scrollTop <= 2;
+    down.hidden = !canScroll || viewport.scrollTop >= max - 2;
+  };
+  if (!root.dataset.scrollBound) {
+    root.dataset.scrollBound = "1";
+    viewport.addEventListener("scroll", sync, { passive: true });
+    up.addEventListener("click", () => viewport.scrollBy({ top: -140, behavior: "smooth" }));
+    down.addEventListener("click", () => viewport.scrollBy({ top: 140, behavior: "smooth" }));
+  }
+  sync();
+}
+
+function refreshNotionScrolls() {
+  document.querySelectorAll("[data-notion-scroll]").forEach(bindNotionScroll);
+}
+
+function renderSearchModalResults() {
+  if (!searchModalList || !searchModalPreview) return;
+  syncSearchModalChrome();
+  const visible = searchModalFilteredParts();
+  const groups = groupedPartResults(visible).slice(0, 100);
+  if (!groups.some((group) => partKey(group.representative) === searchModalSelection)) {
+    searchModalSelection = partKey(groups[0]?.representative) || null;
+  }
+  searchModalList.innerHTML = groups.length
+    ? groups.map((group) => {
+      const part = group.representative;
+      const key = partKey(part);
+      return `
+        <button class="searchResultItem${key === searchModalSelection ? " active" : ""}" type="button" data-search-select="${escapeHtml(key)}">
+          <strong>${escapeHtml(part.part_number)}^${escapeHtml(part.revision || "A")}</strong>
+          <span>${escapeHtml(part.name)} · ${escapeHtml(part.project || "Unassigned")}</span>
+        </button>
+      `;
+    }).join("")
+    : `<p class="sidebarEmpty">No matching parts</p>`;
+  const selected = findPartByKey(searchModalSelection);
+  searchModalPreview.innerHTML = selected
+    ? `
+      <section class="propertySection">
+        <h3 class="searchPreviewTitle">${escapeHtml(partObjectLabel(selected))}</h3>
+        <p class="searchPreviewSubtitle">${escapeHtml(selected.name)}</p>
+        <dl class="propertyGrid">
+          ${property("Project", selected.project || "Unassigned")}
+          ${property("Part Maturity", maturityStageLabel(selected))}
+          ${property("Release Status", releaseStatusLabel(selected))}
+          ${property("Revision", selected.revision || "A")}
+          ${property("Created By", createdBy(selected))}
+          ${property("Last Updated By", updatedBy(selected))}
+          ${property("Traceability", traceabilityLabel(selected))}
+          ${property("Description", selected.description || "Not set")}
+        </dl>
+        <div class="partEditActions">
+          <button class="iconButton primaryAction formAction" type="button" data-search-open="${escapeHtml(partKey(selected))}">Open</button>
+        </div>
+      </section>
+    `
+    : `<p class="empty">Select a result to preview</p>`;
+  requestAnimationFrame(refreshNotionScrolls);
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -753,17 +1556,28 @@ function initRoute() {
 }
 
 function renderApp() {
-  document.title = "PEAK Registry";
+  document.title = "PEAK";
+  if (!workspaceTabs.length || !activeTabId) {
+    renderEmptyWorkspace();
+    syncChrome();
+    renderTabBar();
+    renderSidebarChrome();
+    enableSidebarResizing();
+    return;
+  }
   if (activeNavMode === "part") {
     renderOpenedPartWorkspace();
   } else {
     renderSearchWorkspace();
   }
   syncChrome();
+  renderTabBar();
+  renderSidebarChrome();
   enableColumnResizing();
   enableBomColumnResizing();
   enableBomColumnReordering();
   enablePaneResizing();
+  enableSidebarResizing();
 }
 
 function renderSearchWorkspace() {
@@ -784,7 +1598,9 @@ function renderSearchWorkspace() {
   navigatorTitle.textContent = pageNavigatorTitle();
   resultsTitle.textContent = searchTitle();
   workspaceHeading.textContent = pageHeading();
-  document.querySelector(".eyebrow").textContent = pageDescription();
+  if (pageDescriptionEl) {
+    pageDescriptionEl.textContent = pageDescription();
+  }
 
   renderNavigationTree();
   renderMainRows(visibleParts);
@@ -858,7 +1674,7 @@ function pageHeading() {
 function pageDescription() {
   const descriptions = {
     home: "Search all parts across every project.",
-    create: "Create draft parts with project-specific part numbers.",
+    create: "Create draft parts, revisions, and projects.",
     projects: "Browse project folders, owners, approvers, and part counts.",
     history: "Review activity across every part revision.",
     table: "Review every part revision and property in a sortable table.",
@@ -947,16 +1763,17 @@ function renderOpenedPartWorkspace() {
     return;
   }
 
-  document.title = `${partObjectLabel(rootPart)} - PEAK Registry`;
+  document.title = `${partObjectLabel(rootPart)} - PEAK`;
   recordCount.textContent = `Opened ${partObjectLabel(rootPart)}`;
   workspaceHeading.textContent = rootPart.name;
-  document.querySelector(".eyebrow").textContent = pageDescription();
-  navigatorTitle.textContent = activePartEditMode ? "Edit BOM Structure" : "BOM Structure";
-  resultsTitle.textContent = activePartEditMode
-    ? `${partObjectLabel(selectedPart)} Edit`
-    : activeAttachmentEditMode
-      ? `${partObjectLabel(selectedPart)} Attachments`
-      : `${partObjectLabel(selectedPart)} Details`;
+  if (pageDescriptionEl) {
+    pageDescriptionEl.textContent = pageDescription();
+  }
+  navigatorTitle.textContent = "";
+  if (navigationTree) {
+    navigationTree.hidden = false;
+  }
+  resultsTitle.textContent = "";
 
   renderBomTree();
   tableHead.innerHTML = "";
@@ -964,25 +1781,29 @@ function renderOpenedPartWorkspace() {
   renderOpenedPartDetail(rootPart, selectedPart);
 }
 
-function matchesSearch(part, query) {
+function matchesSearch(part, query, { titleOnly = false } = {}) {
   if (!query) {
     return true;
   }
 
-  const haystack = [
-    part.part_number,
-    part.object_id,
-    part.name,
-    part.description,
-    part.project,
-    revisionStatusValue(part),
-    part.revision,
-    part.owner,
-    ...(part.tags ?? []),
-    ...(part.attachments ?? []).flatMap((document) => [document.type, document.title]),
-    ...(part.documents ?? []).flatMap((document) => [document.type, document.title]),
-    ...(part.onshape ?? []).flatMap((reference) => [reference.type, reference.title])
-  ]
+  const haystack = (titleOnly
+    ? [part.part_number, part.object_id, part.name]
+    : [
+      part.part_number,
+      part.object_id,
+      part.name,
+      part.description,
+      part.project,
+      revisionStatusValue(part),
+      part.revision,
+      part.owner,
+      part.created_by,
+      maturityStageLabel(part),
+      ...(part.tags ?? []),
+      ...(part.attachments ?? []).flatMap((document) => [document.type, document.title]),
+      ...(part.documents ?? []).flatMap((document) => [document.type, document.title]),
+      ...(part.onshape ?? []).flatMap((reference) => [reference.type, reference.title])
+    ])
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -1401,23 +2222,29 @@ function renderCreateHubRows() {
   partsList.innerHTML = `
     <tr class="createHubRow">
       <td colspan="10">
-        <div class="createHub" aria-label="Create options">
-          <button class="createTile" type="button" data-create-mode="new">
-            <strong>Create New Item</strong>
-            <span>Start a new draft part at revision A.</span>
-          </button>
-          <button class="createTile" type="button" data-create-mode="source">
-            <strong>Create from Source</strong>
-            <span>Create a related draft from an existing part.</span>
-          </button>
-          <button class="createTile" type="button" data-create-mode="revision">
-            <strong>Create Revision</strong>
-            <span>Open the next draft revision for an existing part.</span>
-          </button>
-          <button class="createTile" type="button" data-create-mode="project">
-            <strong>Create Project</strong>
-            <span>Add project metadata to the product data repository.</span>
-          </button>
+        <div class="createPage">
+          <div class="createPageIntro">
+            <h2>Create</h2>
+            <p>Start a draft part, revision, or project. Drafts stay local until you save and push.</p>
+          </div>
+          <div class="createHub" aria-label="Create options">
+            <button class="createTile" type="button" data-create-mode="new">
+              <strong>New Part</strong>
+              <span>Start a new draft part at revision A.</span>
+            </button>
+            <button class="createTile" type="button" data-create-mode="source">
+              <strong>From Source</strong>
+              <span>Create a related draft from an existing part.</span>
+            </button>
+            <button class="createTile" type="button" data-create-mode="revision">
+              <strong>New Revision</strong>
+              <span>Open the next draft revision for an existing part.</span>
+            </button>
+            <button class="createTile" type="button" data-create-mode="project">
+              <strong>New Project</strong>
+              <span>Add project metadata to the product data repository.</span>
+            </button>
+          </div>
         </div>
       </td>
     </tr>
@@ -1449,6 +2276,9 @@ function renderCreateItemRows({ fromSource }) {
     <tr class="createFormRow">
       <td colspan="10">
         <div class="createForm">
+          ${renderCreatePageIntro(fromSource ? "From Source" : "New Part", fromSource
+            ? "Create a related draft from an existing part. Opens in edit mode after creation."
+            : "Start a new draft part at revision A. Opens in edit mode after creation.")}
           <div class="createFormField">
             <div class="createFormMeta">
               <label class="createFormLabel" for="newPartProject">Project</label>
@@ -1472,8 +2302,8 @@ function renderCreateItemRows({ fromSource }) {
           </div>
           ${sourceField}
           <div class="createFormActions">
-            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub" title="Cancel" aria-label="Cancel"></button>
-            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-create="${fromSource ? "source" : "new"}" title="Create Draft Item" aria-label="Create Draft Item"></button>
+            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub">Cancel</button>
+            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-create="${fromSource ? "source" : "new"}">Create</button>
           </div>
         </div>
       </td>
@@ -1496,6 +2326,7 @@ function renderCreateRevisionRows() {
     <tr class="createFormRow">
       <td colspan="10">
         <div class="createForm">
+          ${renderCreatePageIntro("New Revision", "Only one unreleased revision is allowed per part. Opens in edit mode after creation.")}
           <div class="createFormField">
             <div class="createFormMeta">
               <label class="createFormLabel" for="revisionSourcePart">Part</label>
@@ -1518,8 +2349,8 @@ function renderCreateRevisionRows() {
             <span class="createFormHint">Major revisions advance A to B. Minor revisions advance A to A01.</span>
           </div>
           <div class="createFormActions">
-            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub" title="Cancel" aria-label="Cancel"></button>
-            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-revision title="Create Draft Revision" aria-label="Create Draft Revision"></button>
+            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub">Cancel</button>
+            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-revision>Create</button>
           </div>
         </div>
       </td>
@@ -1533,6 +2364,7 @@ function renderCreateProjectRows() {
     <tr class="createFormRow">
       <td colspan="10">
         <div class="createForm">
+          ${renderCreatePageIntro("New Project", "Project codes become the prefix for auto-generated part numbers.")}
           <div class="createFormField">
             <div class="createFormMeta">
               <label class="createFormLabel" for="newProjectName">Project Name</label>
@@ -1576,8 +2408,8 @@ function renderCreateProjectRows() {
             <span class="createFormHint">Custom numbers must still be unique and start with the project code.</span>
           </div>
           <div class="createFormActions">
-            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub" title="Cancel" aria-label="Cancel"></button>
-            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-project title="Create Project" aria-label="Create Project"></button>
+            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub">Cancel</button>
+            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-project>Create</button>
           </div>
         </div>
       </td>
@@ -1587,6 +2419,15 @@ function renderCreateProjectRows() {
 
 function renderCreateDetail() {
   partDetail.innerHTML = "";
+}
+
+function renderCreatePageIntro(title, detail) {
+  return `
+    <div class="createPageIntro">
+      <h2>${escapeHtml(title)}</h2>
+      <p>${escapeHtml(detail)}</p>
+    </div>
+  `;
 }
 
 function renderProjectRows() {
@@ -1897,10 +2738,6 @@ function githubAuthSettingsRow() {
 }
 
 function renderAppearanceTabRows() {
-  const currentHex = currentAccentHex();
-  const r = parseInt(currentHex.slice(1, 3), 16);
-  const g = parseInt(currentHex.slice(3, 5), 16);
-  const b = parseInt(currentHex.slice(5, 7), 16);
   partsList.innerHTML = `
     <tr>
       <td colspan="10" class="appearanceCell">
@@ -1919,39 +2756,20 @@ function renderAppearanceTabRows() {
             </div>
           </div>
           <div class="appearanceGroup">
-            <p class="appearanceLabel">Accent Color</p>
-            <div class="accentSwatches">
-              ${accentPresets.map((preset) => `
-                <button class="accentSwatch${activeAccentColor === preset.id ? " active" : ""}"
-                        type="button"
-                        data-accent-color="${escapeHtml(preset.id)}"
-                        style="background: ${preset.color};"
-                        title="${escapeHtml(preset.name)}"
-                        aria-label="${escapeHtml(preset.name)} accent color"></button>
-              `).join("")}
-            </div>
-            <div class="customColorRow">
-              <span class="customColorLabel">Custom</span>
-              <input type="color"
-                     id="accentColorPicker"
-                     class="accentColorPicker${activeAccentColor === "custom" ? " active" : ""}"
-                     value="${escapeHtml(currentHex)}"
-                     title="Custom accent color"
-                     aria-label="Custom accent color">
-              <div class="rgbInputGroup">
-                <div class="rgbFieldWrap">
-                  <span class="rgbFieldLabel">R</span>
-                  <input type="number" id="accentR" class="rgbField" min="0" max="255" value="${r}" aria-label="Red channel">
-                </div>
-                <div class="rgbFieldWrap">
-                  <span class="rgbFieldLabel">G</span>
-                  <input type="number" id="accentG" class="rgbField" min="0" max="255" value="${g}" aria-label="Green channel">
-                </div>
-                <div class="rgbFieldWrap">
-                  <span class="rgbFieldLabel">B</span>
-                  <input type="number" id="accentB" class="rgbField" min="0" max="255" value="${b}" aria-label="Blue channel">
-                </div>
-              </div>
+            <p class="appearanceLabel">Typography</p>
+            <div class="fontPrefRow">
+              <label>
+                Font
+                <select id="peakFontFamily" aria-label="Font family">
+                  ${fontFamilyOptions.map((option) => `
+                    <option value="${escapeHtml(option.id)}"${activeFontFamily === option.id ? " selected" : ""}>${escapeHtml(option.label)}</option>
+                  `).join("")}
+                </select>
+              </label>
+              <label>
+                Size
+                <input type="number" id="peakFontSize" min="10" max="24" step="1" value="${escapeHtml(activeFontSize)}" aria-label="Font size">
+              </label>
             </div>
           </div>
         </div>
@@ -1992,14 +2810,232 @@ function renderSearchDetail() {
 }
 
 function renderOpenedPartDetail(rootPart, selectedPart) {
+  const key = partKey(selectedPart);
+  const isFavorite = favoritePartKeys.includes(key);
+  const panelOpen = partAsidePanel === "info" || partAsidePanel === "options";
+  const editing = activePartEditMode && isDraftRevision(selectedPart);
+  const releasedLabel = mostRecentlyReleasedLabel(selectedPart);
+  const driveUrl = documentUrl(selectedPart, "drive");
+  const onshapeUrl = documentUrl(selectedPart, "onshape");
+  const workUrl = documentUrl(selectedPart, "work");
   partDetail.innerHTML = `
-    <div class="partDetailLayout">
+    <div class="partDetailLayout partDetailV2${panelOpen ? " panel-open" : ""}">
       <div class="partDetailMain">
-        ${propertyTabs()}
-        ${renderPropertyBody(selectedPart)}
+        <header class="partDetailToolbar">
+          <div class="partDetailHeading">
+            ${editing
+              ? `<input class="partDetailNameInput" data-open-part-field="name" value="${escapeHtml(selectedPart.name || "")}" aria-label="Name">`
+              : `<h2 class="partDetailName">${escapeHtml(selectedPart.name || "Untitled")}</h2>`}
+            <p class="partDetailObjectId">${escapeHtml(releasedLabel)}</p>
+            <div class="partDetailLinkActions" aria-label="External links">
+              ${partActionButton("Open Google Drive", "open-drive", { disabled: !driveUrl })}
+              ${partActionButton("Open Onshape", "open-onshape", { disabled: !onshapeUrl })}
+              ${partActionButton("Open WI", "open-work", { disabled: !workUrl })}
+            </div>
+          </div>
+          <div class="partDetailToolbarActions">
+            <button class="partToolBtn${partAsidePanel === "info" ? " active" : ""}" type="button" data-part-panel="info" title="Details" aria-label="Details" aria-pressed="${partAsidePanel === "info"}"></button>
+            <button class="partToolBtn partToolStar${isFavorite ? " active" : ""}" type="button" data-part-favorite="${escapeHtml(key)}" title="${isFavorite ? "Unfavorite" : "Favorite"}" aria-label="${isFavorite ? "Unfavorite" : "Favorite"}" aria-pressed="${isFavorite}"></button>
+            <button class="partToolBtn${partAsidePanel === "options" ? " active" : ""}" type="button" data-part-panel="options" title="Options" aria-label="Options" aria-pressed="${partAsidePanel === "options"}"></button>
+          </div>
+        </header>
+        <div class="partDetailBody notionScroll" data-notion-scroll>
+          <button class="notionScrollChevron up" type="button" data-scroll-dir="-1" hidden aria-label="Scroll up"></button>
+          <div class="partDetailScroll notionScrollViewport">
+            ${renderCombinedPartDetails(selectedPart)}
+          </div>
+          <button class="notionScrollChevron down" type="button" data-scroll-dir="1" hidden aria-label="Scroll down"></button>
+        </div>
       </div>
-      ${partActionRail(selectedPart)}
+      ${panelOpen ? renderPartAsidePanel(selectedPart) : ""}
     </div>
+  `;
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function mostRecentlyReleasedLabel(part) {
+  const revisions = parts.filter((candidate) => candidate.part_number === part.part_number);
+  const released = latestReleasedRevision(revisions) || representativeRevision(revisions) || part;
+  return `${released.part_number}^${released.revision || "A"}`;
+}
+
+function renderPartAsidePanel(part) {
+  if (partAsidePanel === "options") {
+    return renderPartOptionsPanel(part);
+  }
+  return renderPartInfoPanel(part);
+}
+
+function renderPartInfoPanel(part) {
+  return `
+    <aside class="partAsidePanel" aria-label="Part details">
+      <header class="partAsideHeader">
+        <h3>Details</h3>
+        <button class="partAsideClose" type="button" data-part-panel-close aria-label="Close">×</button>
+      </header>
+      <div class="notionPropsPanel">
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Created by</span>
+          <span class="notionPropValue">${escapeHtml(createdBy(part))}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Created</span>
+          <span class="notionPropValue">${escapeHtml(formatPartTimestamp(part.created_at))}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Last edited by</span>
+          <span class="notionPropValue">${escapeHtml(updatedBy(part))}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Last edited</span>
+          <span class="notionPropValue">${escapeHtml(formatPartTimestamp(part.updated_at))}</span>
+        </div>
+      </div>
+    </aside>
+  `;
+}
+
+function renderPartOptionsPanel(part) {
+  const driveUrl = documentUrl(part, "drive");
+  const onshapeUrl = documentUrl(part, "onshape");
+  const workUrl = documentUrl(part, "work");
+  const canEdit = isDraftRevision(part);
+  return `
+    <aside class="partAsidePanel" aria-label="Part options">
+      <header class="partAsideHeader">
+        <h3>Options</h3>
+        <button class="partAsideClose" type="button" data-part-panel-close aria-label="Close">×</button>
+      </header>
+      <div class="partOptionsList">
+        <button class="partOptionItem" type="button" data-part-action="open-drive"${driveUrl ? "" : " disabled"}>Open Google Drive</button>
+        <button class="partOptionItem" type="button" data-part-action="open-onshape"${onshapeUrl ? "" : " disabled"}>Open CAD</button>
+        <button class="partOptionItem" type="button" data-part-action="open-work"${workUrl ? "" : " disabled"}>Open WI</button>
+        <button class="partOptionItem" type="button" data-part-action="edit-part"${canEdit ? "" : " disabled"}${activePartEditMode ? " aria-current=\"true\"" : ""}>Edit Part</button>
+        <button class="partOptionItem" type="button" data-part-action="edit-attachments"${activeAttachmentEditMode ? " aria-current=\"true\"" : ""}>Edit Attachments</button>
+        <button class="partOptionItem" type="button" data-part-action="copy-part-id">Copy Part ID</button>
+      </div>
+    </aside>
+  `;
+}
+
+function formatPartTimestamp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Not set";
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
+function renderCombinedPartDetails(part) {
+  if (activeAttachmentEditMode) {
+    return renderEditableAttachmentsTab(part);
+  }
+  const editing = activePartEditMode && isDraftRevision(part);
+  const legacyPartNumber = legacyPartNumberValue(part);
+  const propertyRows = [
+    editing ? propertyEditInline("Description", "description", part.description || "", { textarea: true }) : property("Description", part.description || "Not set"),
+    editing ? propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }) : property("Revision Description", part.change_summary || "Not set"),
+    property("Project", part.project || "Unassigned"),
+    editing ? propertyEditSelectInline("Traceability", "traceability", traceabilityValue(part), traceabilityOptions()) : property("Traceability", traceabilityLabel(part)),
+    property("Part Maturity", maturityStageLabel(part)),
+    property("Release Status", releaseStatusLabel(part)),
+    editing ? propertyEditInline("Legacy Number", "legacy_part_number", legacyPartNumber) : property("Legacy Number", legacyPartNumber || "Not set"),
+    editing ? propertyEditInline("Cost", "cost", optionalPartPropertyValue(part, "cost")) : property("Cost", optionalPartPropertyValue(part, "cost") || "Not set"),
+    editing ? propertyEditInline("Mass", "mass", optionalPartPropertyValue(part, "mass")) : property("Mass", optionalPartPropertyValue(part, "mass") || "Not set"),
+    propertyHtml("Based On", basedOnLink(part)),
+    ...(editing ? [
+      propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")),
+      propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")),
+      propertyEditInline("Work Instructions Link", "workUrl", documentUrl(part, "work")),
+      propertyEditInline("Approvers", "approvers", (part.approvers ?? []).map((approver) => approver.name || approver).join(", "))
+    ] : [])
+  ].filter(Boolean);
+
+  return `
+    <div class="partCombinedLayout">
+      ${detailSection("", propertyRows)}
+      ${editing ? `
+        <div class="partEditActions">
+          <button class="iconButton primaryAction formAction" type="button" data-save-open-part="${escapeHtml(partKey(part))}">Save Part</button>
+          <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
+        </div>
+      ` : ""}
+      ${renderAttachmentSections(part)}
+      ${renderWhereUsedHistory(part)}
+      ${renderRevisionHistory(part)}
+      ${renderMaturityProgress(part)}
+      ${renderInlineWorkflow(part)}
+      ${(() => {
+        const activityItems = activityHistoryForPart(part);
+        return `
+          <section class="propertySection">
+            <h3>Activity</h3>
+            ${activityItems.length ? renderActivityHistory(activityItems) : `<p class="empty">No activity recorded for this part.</p>`}
+          </section>
+        `;
+      })()}
+    </div>
+  `;
+}
+
+function renderInlineWorkflow(part) {
+  const maturityTransition = nextMaturityTransition(part);
+  const revisionTransition = nextRevisionTransition(part);
+  const revertTransition = revisionStatusValue(part) === "release_candidate" ? { to: "draft", mode: "direct", action: "revert" } : null;
+  const deleteTransition = isDraftRevision(part) ? { to: "delete", mode: "direct", action: "delete" } : null;
+  const maturityRule = maturityWorkflowRule(part, maturityTransition?.to);
+  const revisionRule = revisionWorkflowRule(part, revisionTransition?.to);
+  const revertRule = revertTransition ? revisionWorkflowRule(part, "draft") : workflowRule([]);
+  const deleteRule = deleteTransition ? revisionWorkflowRule(part, "delete") : workflowRule([]);
+  return `
+    <section class="propertySection workflowSection">
+      <h3>Product Maturity</h3>
+      ${workflowTimeline(maturityWorkflowStates, maturityStageValue(part), maturityStageText)}
+      <dl class="propertyGrid workflowGrid">
+        ${property("Current", maturityStageLabel(part))}
+        ${property("Next", maturityTransition ? maturityStageText(maturityTransition.to) : "No transition available")}
+      </dl>
+      ${workflowCriteriaList(maturityRule, { jumpable: true })}
+      ${workflowActionButton(maturityTransition, maturityRule, `Transition to ${maturityTransition ? maturityStageText(maturityTransition.to) : ""}`, "maturity", part)}
+      ${workflowFeedbackMessage("maturity", part)}
+    </section>
+    <section class="propertySection workflowSection">
+      <h3>Revision Status</h3>
+      ${workflowTimeline(revisionWorkflowStates, revisionStatusValue(part), revisionStatusText)}
+      <dl class="propertyGrid workflowGrid">
+        ${property("Current", releaseStatusLabel(part))}
+        ${property("Next", revisionTransition ? revisionStatusText(revisionTransition.to) : "No transition available")}
+      </dl>
+      ${workflowCriteriaList(revisionRule, { jumpable: true })}
+      ${workflowActionButtons([
+        {
+          transition: revisionTransition,
+          rule: revisionRule,
+          label: revisionTransition?.to === "release_candidate" ? "Set Release Candidate" : `Transition to ${revisionTransition ? revisionStatusText(revisionTransition.to) : ""}`,
+          workflow: "revision"
+        },
+        {
+          transition: revertTransition,
+          rule: revertRule,
+          label: "Revert to Draft",
+          workflow: "revision"
+        },
+        {
+          transition: deleteTransition,
+          rule: deleteRule,
+          label: "Delete Draft Revision",
+          workflow: "revision",
+          danger: true
+        }
+      ], part)}
+      ${workflowFeedbackMessage("revision", part)}
+    </section>
   `;
 }
 
@@ -2138,10 +3174,10 @@ function renderOverviewTab(part) {
     <div class="overviewLayout">
       <div class="overviewColumn">
         ${detailSection("Properties", propertyRows)}
-        ${detailSection("Specifications", [
-          editing ? propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")) : propertyLink("Google Drive Link", documentUrl(part, "drive")),
-          editing ? propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")) : propertyLink("Onshape Link", documentUrl(part, "onshape")),
-          editing ? propertyEditInline("Work Instructions Link", "workUrl", documentUrl(part, "work")) : propertyLink("Work Instructions Link", documentUrl(part, "work"))
+        ${detailSection("Links", [
+          editing ? propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")) : propertyLink("Google Drive Link", documentUrl(part, "drive"), { kind: "drive", required: true }),
+          editing ? propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")) : propertyLink("Onshape Link", documentUrl(part, "onshape"), { kind: "onshape", required: true }),
+          editing ? propertyEditInline("Work Instructions Link", "workUrl", documentUrl(part, "work")) : propertyLink("Work Instructions Link", documentUrl(part, "work"), { kind: "work" })
         ])}
         ${detailSection("Optional Properties", [
           editing ? propertyEditInline("Legacy Number", "legacy_part_number", legacyPartNumber) : property("Legacy Number", legacyPartNumber || "Not set"),
@@ -2242,7 +3278,38 @@ function renderWorkflowTab(part) {
   const revisionRule = revisionWorkflowRule(part, revisionTransition?.to);
   const revertRule = revertTransition ? revisionWorkflowRule(part, "draft") : workflowRule([]);
   const deleteRule = deleteTransition ? revisionWorkflowRule(part, "delete") : workflowRule([]);
+  const primary = revisionTransition
+    ? {
+        title: revisionTransition.to === "release_candidate" ? "Next: Set Release Candidate" : `Next: ${revisionStatusText(revisionTransition.to)}`,
+        detail: revisionTransition.mode === "direct"
+          ? "This transition pushes directly to the product data remote."
+          : "This transition opens a GitHub pull request for review.",
+        transition: revisionTransition,
+        rule: revisionRule,
+        workflow: "revision",
+        label: revisionTransition.to === "release_candidate" ? "Set Release Candidate" : `Transition to ${revisionStatusText(revisionTransition.to)}`
+      }
+    : maturityTransition
+      ? {
+          title: `Next: ${maturityStageText(maturityTransition.to)}`,
+          detail: "Maturity changes are reviewed through a GitHub pull request.",
+          transition: maturityTransition,
+          rule: maturityRule,
+          workflow: "maturity",
+          label: `Transition to ${maturityStageText(maturityTransition.to)}`
+        }
+      : null;
   return `
+    ${primary ? `
+      <section class="propertySection">
+        <div class="workflowNextCard">
+          <strong>${escapeHtml(primary.title)}</strong>
+          <p>${escapeHtml(primary.detail)}</p>
+          ${workflowCriteriaList(primary.rule, { jumpable: true })}
+          ${workflowActionButton(primary.transition, primary.rule, primary.label, primary.workflow, part)}
+        </div>
+      </section>
+    ` : ""}
     <section class="propertySection workflowSection">
       <h3>Product Maturity</h3>
       ${workflowTimeline(maturityWorkflowStates, maturityStageValue(part), maturityStageText)}
@@ -2252,7 +3319,7 @@ function renderWorkflowTab(part) {
         ${property("Next", maturityTransition ? maturityStageText(maturityTransition.to) : "No transition available")}
         ${property("Approval", maturityTransition ? "Merge request" : "Complete")}
       </dl>
-      ${workflowCriteriaList(maturityRule)}
+      ${workflowCriteriaList(maturityRule, { jumpable: true })}
       ${workflowActionButton(maturityTransition, maturityRule, `Transition to ${maturityTransition ? maturityStageText(maturityTransition.to) : ""}`, "maturity", part)}
       ${workflowFeedbackMessage("maturity", part)}
     </section>
@@ -2265,7 +3332,7 @@ function renderWorkflowTab(part) {
         ${property("Next", revisionTransition ? revisionStatusText(revisionTransition.to) : "No transition available")}
         ${property("Approval", revisionTransition?.mode === "direct" ? "Direct remote push" : revisionTransition ? "Merge request" : "Complete")}
       </dl>
-      ${workflowCriteriaList(revisionRule)}
+      ${workflowCriteriaList(revisionRule, { jumpable: true })}
       ${workflowActionButtons([
         {
           transition: revisionTransition,
@@ -2372,20 +3439,40 @@ function workflowFeedbackKey(workflow, part) {
   return `${workflow}:${scope || "none"}`;
 }
 
-function workflowCriteriaList(rule) {
-  const items = rule.criteria.map((item) => `
-    <li class="${item.met ? "met" : "blocked"}">
-      <span class="workflowCriterionIcon" aria-hidden="true"></span>
-      <span>${escapeHtml(item.label)}</span>
-    </li>
-  `).join("");
+function workflowCriteriaList(rule, { jumpable = false } = {}) {
+  const items = rule.criteria.map((item) => {
+    const jumpField = jumpable && !item.met ? workflowGateJumpField(item.label) : "";
+    const labelHtml = jumpField
+      ? `<button class="gateJump" type="button" data-gate-jump="${escapeHtml(jumpField)}">${escapeHtml(item.label)}</button>`
+      : `<span>${escapeHtml(item.label)}</span>`;
+    return `
+      <li class="${item.met ? "met" : "blocked"}">
+        <span class="workflowCriterionIcon" aria-hidden="true"></span>
+        ${labelHtml}
+      </li>
+    `;
+  }).join("");
   return `<ul class="workflowCriteria">${items}</ul>`;
+}
+
+function workflowGateJumpField(label) {
+  const normalized = String(label || "").toLowerCase();
+  if (normalized.includes("google drive") || normalized.includes("onshape") || normalized.includes("links")) {
+    return "driveUrl";
+  }
+  if (normalized.includes("required properties") || normalized.includes("description") || normalized.includes("name")) {
+    return "name";
+  }
+  if (normalized.includes("approver")) {
+    return "approvers";
+  }
+  return "";
 }
 
 function detailSection(title, rows) {
   return `
     <section class="propertySection">
-      <h3>${escapeHtml(title)}</h3>
+      ${title ? `<h3>${escapeHtml(title)}</h3>` : ""}
       <dl class="propertyGrid">
         ${rows.join("")}
       </dl>
@@ -2400,11 +3487,32 @@ function property(label, value) {
   `;
 }
 
-function propertyLink(label, url) {
-  const value = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>` : "Not set";
+function propertyLink(label, url, { kind = "", required = false } = {}) {
+  if (!url) {
+    return `
+      <dt>${escapeHtml(label)}${required ? '<span class="linkRequired">required for release</span>' : ""}</dt>
+      <dd>Not set</dd>
+    `;
+  }
+  const parsedId = kind === "onshape"
+    ? onshapeDocumentIdFromUrl(url)
+    : kind === "drive"
+      ? driveIdFromUrl(url)
+      : "";
+  const idLabel = parsedId && parsedId !== "linked-drive-file" && parsedId !== "linked-document"
+    ? `<span class="linkMetaId">${escapeHtml(parsedId)}</span>`
+    : "";
   return `
-    <dt>${escapeHtml(label)}</dt>
-    <dd>${value}</dd>
+    <dt>${escapeHtml(label)}${required ? '<span class="linkRequired">required for release</span>' : ""}</dt>
+    <dd>
+      <div class="linkMetaRow">
+        <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>
+        <div class="linkMetaActions">
+          ${idLabel}
+          <button class="iconButton formAction" type="button" data-copy-link="${escapeHtml(url)}" title="Copy link">Copy</button>
+        </div>
+      </div>
+    </dd>
   `;
 }
 
@@ -3262,11 +4370,23 @@ function renderNavigationTree() {
     navigationTree.innerHTML = `
       <div class="treeGroup">
         <p>Create</p>
-        <button class="treeNode${activeCreateMode === "hub" ? " active" : ""}" type="button" data-create-mode="hub">Create Options</button>
-        <button class="treeNode${activeCreateMode === "new" ? " active" : ""}" type="button" data-create-mode="new">Create New Item</button>
-        <button class="treeNode${activeCreateMode === "source" ? " active" : ""}" type="button" data-create-mode="source">Create from Source</button>
-        <button class="treeNode${activeCreateMode === "revision" ? " active" : ""}" type="button" data-create-mode="revision">Create Revision</button>
-        <button class="treeNode${activeCreateMode === "project" ? " active" : ""}" type="button" data-create-mode="project">Create Project</button>
+        <button class="treeNode${activeCreateMode === "hub" ? " active" : ""}" type="button" data-create-mode="hub">Options</button>
+        <button class="treeNode${activeCreateMode === "new" ? " active" : ""}" type="button" data-create-mode="new">New Part</button>
+        <button class="treeNode${activeCreateMode === "source" ? " active" : ""}" type="button" data-create-mode="source">From Source</button>
+        <button class="treeNode${activeCreateMode === "revision" ? " active" : ""}" type="button" data-create-mode="revision">New Revision</button>
+        <button class="treeNode${activeCreateMode === "project" ? " active" : ""}" type="button" data-create-mode="project">New Project</button>
+      </div>
+    `;
+    return;
+  }
+
+  if (activeNavMode === "settings") {
+    navigationTree.innerHTML = `
+      <div class="treeGroup">
+        <p>Settings</p>
+        <button class="treeNode${activeSettingsTab === "setup" ? " active" : ""}" type="button" data-settings-tab="setup">Setup</button>
+        <button class="treeNode${activeSettingsTab === "appearance" ? " active" : ""}" type="button" data-settings-tab="appearance">Appearance</button>
+        <button class="treeNode${activeSettingsTab === "preferences" ? " active" : ""}" type="button" data-settings-tab="preferences">Preferences</button>
       </div>
     `;
     return;
@@ -3290,16 +4410,6 @@ function renderNavigationTree() {
         <button class="treeNode" type="button" data-filter-state="draft">Draft parts</button>
         <button class="treeNode" type="button" data-filter-state="release_candidate">Release candidates</button>
         <button class="treeNode" type="button" data-filter-state="released">Released parts</button>
-      </div>
-    `;
-    return;
-  }
-
-  if (activeNavMode === "settings") {
-    navigationTree.innerHTML = `
-      <div class="treeGroup">
-        <p>Settings</p>
-        <button class="treeNode root" type="button" data-focus-settings="true">Local Settings</button>
       </div>
     `;
     return;
@@ -3375,15 +4485,15 @@ function renderBomRowCells({ type, part, item, child, childId, toggle = "", edit
     }
 
     if (key === "item") {
-      if (type === "root") return `<span class="bomItem">${escapeHtml(part.part_number)}</span>`;
+      if (type === "root") return `<span class="bomItem bomItemCell">${escapeHtml(part.part_number)}</span>`;
       return `<div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child?.part_number || item.child_part_number)}</button></div>`;
     }
     if (key === "name") return `<span class="bomName">${escapeHtml(part?.name || child?.name || "External component")}</span>`;
     if (key === "quantity") {
-      if (type === "root") return '<span class="bomQty">1 each</span>';
+      if (type === "root") return '<span class="bomQty">1</span>';
       return editable
         ? `<input class="tableInput bomQtyInput" value="${escapeHtml(item.quantity)}" data-bom-qty="${escapeHtml(childId)}">`
-        : `<span class="bomQty">${escapeHtml(item.quantity)} ${escapeHtml(item.unit)}</span>`;
+        : `<span class="bomQty">${escapeHtml(item.quantity)}</span>`;
     }
     if (key === "revision") return `<span class="bomRevision">${escapeHtml(part?.revision || child?.revision || item?.child_revision || "—")}</span>`;
     return `<span class="bomStatus">${escapeHtml(part ? releaseStatusLabel(part) : child ? releaseStatusLabel(child) : "Not found")}</span>`;
@@ -3552,28 +4662,24 @@ function nextProjectPartNumber(project) {
 
 function applyNavMode(mode) {
   statusMessage = "";
-  openedPartNumber = null;
-  selectedBomPartNumber = null;
-  activePartEditMode = false;
-  activeAttachmentEditMode = false;
-  activeProjectEditMode = false;
-  const url = new URL(window.location.href);
-  url.searchParams.delete("part");
-  url.searchParams.delete("object");
-  url.searchParams.delete("rev");
-  url.searchParams.delete("edit");
-  window.history.replaceState({}, "", url);
-  if (mode === "home") {
-    searchInput.value = "";
-    stateFilter.value = "";
-    projectFilter.value = "";
-    activeResultView = "grid";
+  if (mode !== "part") {
+    openedPartNumber = null;
+    selectedBomPartNumber = null;
+    activePartEditMode = false;
+    activeAttachmentEditMode = false;
+    activeProjectEditMode = false;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("part");
+    url.searchParams.delete("object");
+    url.searchParams.delete("rev");
+    url.searchParams.delete("edit");
+    window.history.replaceState({}, "", url);
   }
-
-  if (mode === "create" || mode === "projects" || mode === "history" || mode === "table" || mode === "report" || mode === "settings") {
+  if (mode === "home" && searchInput) {
     searchInput.value = "";
-    stateFilter.value = "";
-    projectFilter.value = "";
+    if (stateFilter) stateFilter.value = "";
+    if (projectFilter) projectFilter.value = "";
+    activeResultView = "grid";
   }
 }
 
@@ -3581,28 +4687,10 @@ function openSelectedPart({ newTab = false, editMode = false } = {}) {
   if (!selectedPartNumber) {
     return;
   }
-  if (!newTab && preventPartNavigationDuringEdit(selectedPartNumber)) {
-    return;
-  }
-  const url = partUrl(selectedPartNumber, { editMode });
-  if (newTab) {
-    window.open(url, "_blank", "noopener,noreferrer");
-    return;
-  }
-  openedPartNumber = selectedPartNumber;
-  selectedBomPartNumber = selectedPartNumber;
-  activePartEditMode = editMode;
-  activeAttachmentEditMode = false;
-  activeAttachmentDraftCount = 0;
-  activeNavMode = "part";
-  searchInput.value = "";
-  searchSuggestions.innerHTML = "";
-  searchSuggestions.classList.remove("visible");
-  window.history.replaceState({}, "", url);
-  renderApp();
+  moveToPart(selectedPartNumber, { editMode, newTab });
 }
 
-function moveToPart(partNumber, { editMode = false } = {}) {
+function moveToPart(partNumber, { editMode = false, newTab = false } = {}) {
   if (preventPartNavigationDuringEdit(partNumber)) {
     return;
   }
@@ -3614,15 +4702,19 @@ function moveToPart(partNumber, { editMode = false } = {}) {
   selectedPartNumber = objectId;
   openedPartNumber = objectId;
   selectedBomPartNumber = objectId;
-  activePartEditMode = editMode;
+  activePartEditMode = Boolean(editMode) && isDraftRevision(part);
   activeAttachmentEditMode = false;
   activeAttachmentDraftCount = 0;
+  partAsidePanel = null;
   activeNavMode = "part";
-  searchInput.value = "";
-  searchSuggestions.innerHTML = "";
-  searchSuggestions.classList.remove("visible");
-  window.history.replaceState({}, "", partUrl(objectId, { editMode }));
-  renderApp();
+  if (searchInput) searchInput.value = "";
+  if (searchSuggestions) {
+    searchSuggestions.innerHTML = "";
+    searchSuggestions.classList.remove("visible");
+  }
+  window.history.replaceState({}, "", partUrl(objectId, { editMode: activePartEditMode }));
+  openWorkspaceTab("part", { objectId, editMode: activePartEditMode }, { activate: true, forceNew: newTab });
+  closeSearchModal();
 }
 
 function partUrl(identifier, { editMode = false } = {}) {
@@ -3642,13 +4734,67 @@ function partUrl(identifier, { editMode = false } = {}) {
 
 function syncChrome() {
   const isOpened = activeNavMode === "part";
-  const isSinglePane = ["create", "settings"].includes(activeNavMode);
+  const isSinglePane = ["settings"].includes(activeNavMode);
   const isReportPane = activeNavMode === "report";
   const isProjectPane = activeNavMode === "projects";
   const isTablePane = activeNavMode === "table" || activeNavMode === "history";
   const isHomePane = activeNavMode === "home";
   document.body.classList.toggle("openedPartMode", isOpened);
+  document.body.classList.toggle("partCanvasMode", isOpened);
   document.body.classList.toggle("searchMode", !isOpened);
+  if (appRoot) {
+    appRoot.dataset.mode = activeNavMode;
+    appRoot.classList.toggle("sidebar-collapsed", !sidebarOpen);
+  }
+  appSidebar?.classList.toggle("open", sidebarOpen);
+
+  if (navigatorPane) {
+    navigatorPane.hidden = !isOpened;
+    if (isOpened) {
+      navigatorPane.style.setProperty("display", "grid", "important");
+      navigatorPane.style.gridColumn = "1";
+    } else {
+      navigatorPane.style.setProperty("display", "none", "important");
+    }
+  }
+  if (navigationTree) {
+    navigationTree.hidden = !isOpened;
+  }
+
+  // Part mode: BOM left / details right, default 50/50, resizable
+  if (isOpened && workspace) {
+    const ratio = clamp(activeBomPaneWidthRatio || 0.5, 0.2, 0.75);
+    workspace.style.setProperty("--nav-width", `${(ratio * 100).toFixed(1)}%`);
+    workspace.style.gridTemplateColumns = "minmax(180px, var(--nav-width)) 6px minmax(0, 1fr)";
+    const resultsPane = workspace.querySelector(".resultsPane");
+    const resizeLeft = workspace.querySelector(".resizeHandleLeft");
+    const resizeRight = workspace.querySelector(".resizeHandleRight");
+    if (resultsPane) resultsPane.style.setProperty("display", "none", "important");
+    if (resizeRight) resizeRight.style.setProperty("display", "none", "important");
+    if (resizeLeft) {
+      resizeLeft.style.setProperty("display", "block", "important");
+      resizeLeft.style.gridColumn = "2";
+    }
+    const propertiesPane = workspace.querySelector(".propertiesPane");
+    if (propertiesPane) {
+      propertiesPane.style.gridColumn = "3";
+      propertiesPane.style.setProperty("display", "flex", "important");
+    }
+  } else if (workspace) {
+    workspace.style.removeProperty("grid-template-columns");
+    const resultsPane = workspace.querySelector(".resultsPane");
+    const resizeLeft = workspace.querySelector(".resizeHandleLeft");
+    const resizeRight = workspace.querySelector(".resizeHandleRight");
+    if (resultsPane) resultsPane.style.removeProperty("display");
+    if (resizeRight) resizeRight.style.removeProperty("display");
+    if (resizeLeft) resizeLeft.style.setProperty("display", "none", "important");
+    const propertiesPane = workspace.querySelector(".propertiesPane");
+    if (propertiesPane) {
+      propertiesPane.style.removeProperty("grid-column");
+      propertiesPane.style.removeProperty("display");
+    }
+  }
+
   workspace.classList.toggle("homeWorkspace", isHomePane);
   workspace.classList.toggle("partWorkspace", isOpened);
   workspace.classList.toggle("partReadOnlyWorkspace", isOpened && !activePartEditMode);
@@ -3657,16 +4803,11 @@ function syncChrome() {
   workspace.classList.toggle("reportWorkspace", isReportPane);
   workspace.classList.toggle("projectWorkspace", isProjectPane);
   workspace.classList.toggle("tabularWorkspace", isTablePane);
-  if (isOpened) {
-    workspace.style.setProperty("--nav-width", `${activeBomPaneWidthRatio * 100}%`);
-  } else if (!isHomePane) {
-    workspace.style.removeProperty("--nav-width");
-  }
 
   navItems.forEach((button) => {
     button.classList.toggle("active", button.dataset.navMode === activeNavMode);
   });
-  repoBadge.hidden = !hasRepoChanges;
+  if (repoBadge) repoBadge.hidden = !hasRepoChanges;
   renderSearchSuggestions();
 }
 
@@ -3688,6 +4829,7 @@ function showPartContextMenu(event, partNumber) {
     <button type="button" role="menuitem" data-context-action="open">Open</button>
     <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
     <button type="button" role="menuitem" data-context-action="edit">Edit</button>
+    <button type="button" role="menuitem" data-context-action="favorite">${favoritePartKeys.includes(partNumber) ? "Unfavorite" : "Favorite"}</button>
   `;
   positionContextMenu(event);
 }
@@ -3771,19 +4913,10 @@ partsList.addEventListener("input", (event) => {
     renderBasedOnSuggestions(event.target.value);
     return;
   }
-  if (event.target.matches("#accentColorPicker")) {
-    applyCustomAccentLive(event.target.value);
-    return;
-  }
-  if (event.target.matches(".rgbField")) {
-    const rVal = Math.max(0, Math.min(255, parseInt(document.querySelector("#accentR")?.value || "0") || 0));
-    const gVal = Math.max(0, Math.min(255, parseInt(document.querySelector("#accentG")?.value || "0") || 0));
-    const bVal = Math.max(0, Math.min(255, parseInt(document.querySelector("#accentB")?.value || "0") || 0));
-    const hex = "#" + [rVal, gVal, bVal].map((v) => v.toString(16).padStart(2, "0")).join("");
-    applyCustomAccentLive(hex);
-    const picker = document.querySelector("#accentColorPicker");
-    if (picker) picker.value = hex;
-    return;
+  if (event.target.matches("#peakFontSize")) {
+    activeFontSize = clamp(Number(event.target.value) || 14, 10, 24);
+    localStorage.setItem("peakFontSize", String(activeFontSize));
+    applyAppearance(activeColorScheme);
   }
 });
 
@@ -3796,27 +4929,18 @@ partsList.addEventListener("change", (event) => {
     updateNewRevisionValue();
     return;
   }
-  if (event.target.matches("#accentColorPicker")) {
-    activeAccentColor = "custom";
-    activeAccentCustomHex = event.target.value;
-    applyAppearance(activeColorScheme, "custom");
-    localStorage.setItem("peakAccentColor", "custom");
-    localStorage.setItem("peakAccentCustomHex", activeAccentCustomHex);
+  if (event.target.matches("#peakFontFamily")) {
+    activeFontFamily = event.target.value || "inter";
+    localStorage.setItem("peakFontFamily", activeFontFamily);
+    applyAppearance(activeColorScheme);
     renderApp();
     return;
   }
-  if (event.target.matches(".rgbField")) {
-    const rVal = Math.max(0, Math.min(255, parseInt(document.querySelector("#accentR")?.value || "0") || 0));
-    const gVal = Math.max(0, Math.min(255, parseInt(document.querySelector("#accentG")?.value || "0") || 0));
-    const bVal = Math.max(0, Math.min(255, parseInt(document.querySelector("#accentB")?.value || "0") || 0));
-    const hex = "#" + [rVal, gVal, bVal].map((v) => v.toString(16).padStart(2, "0")).join("");
-    activeAccentColor = "custom";
-    activeAccentCustomHex = hex;
-    applyAppearance(activeColorScheme, "custom");
-    localStorage.setItem("peakAccentColor", "custom");
-    localStorage.setItem("peakAccentCustomHex", hex);
+  if (event.target.matches("#peakFontSize")) {
+    activeFontSize = clamp(Number(event.target.value) || 14, 10, 24);
+    localStorage.setItem("peakFontSize", String(activeFontSize));
+    applyAppearance(activeColorScheme);
     renderApp();
-    return;
   }
 });
 
@@ -3931,6 +5055,27 @@ partDetail.addEventListener("click", (event) => {
     return;
   }
 
+  const partPanelBtn = event.target.closest("[data-part-panel]");
+  if (partPanelBtn) {
+    const next = partPanelBtn.dataset.partPanel;
+    partAsidePanel = partAsidePanel === next ? null : next;
+    renderApp();
+    return;
+  }
+
+  if (event.target.closest("[data-part-panel-close]")) {
+    partAsidePanel = null;
+    renderApp();
+    return;
+  }
+
+  const favoriteBtn = event.target.closest("[data-part-favorite]");
+  if (favoriteBtn) {
+    toggleFavorite(favoriteBtn.dataset.partFavorite);
+    renderApp();
+    return;
+  }
+
   const cancelPartEdit = event.target.closest("[data-cancel-part-edit]");
   if (cancelPartEdit) {
     activePartEditMode = false;
@@ -4031,8 +5176,8 @@ function handlePartAction(action) {
     }
     activePartEditMode = true;
     activeAttachmentEditMode = false;
-    activePropertyTab = "overview";
     activeAttachmentDraftCount = 0;
+    partAsidePanel = null;
     selectedPartNumber = partKey(part);
     selectedBomPartNumber = partKey(part);
     openedPartNumber = partKey(part);
@@ -4043,8 +5188,8 @@ function handlePartAction(action) {
   if (action === "edit-attachments") {
     activePartEditMode = false;
     activeAttachmentEditMode = true;
-    activePropertyTab = "attachments";
     activeAttachmentDraftCount = 0;
+    partAsidePanel = null;
     statusMessage = `Editing attachments for ${partObjectLabel(part)}`;
     if (openedPartNumber) {
       window.history.replaceState({}, "", partUrl(openedPartNumber));
@@ -4055,8 +5200,8 @@ function handlePartAction(action) {
   if (action === "submit-workflow") {
     activePartEditMode = false;
     activeAttachmentEditMode = false;
-    activePropertyTab = "workflow";
-    statusMessage = `Opened workflow for ${partObjectLabel(part)}`;
+    partAsidePanel = null;
+    statusMessage = `Workflow actions are available on the part page for ${partObjectLabel(part)}`;
     if (openedPartNumber) {
       window.history.replaceState({}, "", partUrl(openedPartNumber));
     }
@@ -4382,7 +5527,7 @@ async function copyPartDetails(part) {
 }
 
 navigationTree.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-select-bom-part], [data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
+  const button = event.target.closest("[data-select-bom-part], [data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-settings-tab], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
   if (!button) {
     return;
   }
@@ -4409,6 +5554,12 @@ navigationTree.addEventListener("click", (event) => {
 
   if (button.dataset.focusSettings) {
     document.querySelector("#settingsProductDataFolder")?.focus();
+    return;
+  }
+
+  if (button.dataset.settingsTab) {
+    activeSettingsTab = button.dataset.settingsTab;
+    renderApp();
     return;
   }
 
@@ -4543,13 +5694,20 @@ navigationTree.addEventListener("drop", (event) => {
 navigationTree.addEventListener("dragend", clearBomDragState);
 
 searchInput.addEventListener("input", () => {
+  if (!searchModal?.hidden) {
+    renderSearchModalResults();
+    return;
+  }
   if (openedPartNumber) {
     renderSearchSuggestions();
     return;
   }
   renderApp();
 });
-searchInput.addEventListener("focus", renderSearchSuggestions);
+searchInput.addEventListener("focus", () => {
+  if (!searchModal?.hidden) return;
+  renderSearchSuggestions();
+});
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".searchBox")) {
     searchSuggestions.classList.remove("visible");
@@ -4566,6 +5724,9 @@ document.addEventListener("click", (event) => {
   }
   if (!event.target.closest("#partContextMenu")) {
     hidePartContextMenu();
+  }
+  if (!event.target.closest("#searchFilterPicker") && !event.target.closest("[data-filter-picker]")) {
+    closeSearchFilterPicker();
   }
 });
 searchSuggestions.addEventListener("click", (event) => {
@@ -4609,7 +5770,7 @@ partContextMenu.addEventListener("click", (event) => {
     return;
   }
   if (actionButton.dataset.contextAction === "open-new-tab") {
-    window.open(partUrl(partNumber), "_blank", "noopener,noreferrer");
+    moveToPart(partNumber, { newTab: true });
     return;
   }
   if (actionButton.dataset.contextAction === "edit") {
@@ -4618,15 +5779,64 @@ partContextMenu.addEventListener("click", (event) => {
     }
     selectedPartNumber = partNumber;
     openSelectedPart({ editMode: true });
+    return;
+  }
+  if (actionButton.dataset.contextAction === "favorite") {
+    toggleFavorite(partNumber);
   }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hidePartContextMenu();
+    if (searchFilterPicker && !searchFilterPicker.hidden) {
+      closeSearchFilterPicker();
+      return;
+    }
+    closeCreateModal();
+    closeSearchModal();
   }
 });
-stateFilter.addEventListener("change", renderApp);
-projectFilter.addEventListener("change", renderApp);
+stateFilter?.addEventListener("change", () => {
+  if (!searchModal?.hidden) {
+    renderSearchModalResults();
+    return;
+  }
+  renderApp();
+});
+projectFilter?.addEventListener("change", () => {
+  if (!searchModal?.hidden) {
+    renderSearchModalResults();
+    return;
+  }
+  renderApp();
+});
+searchFiltersToggle?.addEventListener("click", () => {
+  searchFiltersVisible = !searchFiltersVisible;
+  if (!searchFiltersVisible) closeSearchFilterPicker();
+  syncSearchModalChrome();
+  requestAnimationFrame(refreshNotionScrolls);
+});
+searchPreviewToggle?.addEventListener("click", () => {
+  searchPreviewVisible = !searchPreviewVisible;
+  syncSearchModalChrome();
+  requestAnimationFrame(refreshNotionScrolls);
+});
+searchTitleOnlyBtn?.addEventListener("click", () => {
+  searchTitleOnly = !searchTitleOnly;
+  syncSearchModalChrome();
+  renderSearchModalResults();
+});
+searchFilterChips?.addEventListener("click", (event) => {
+  const picker = event.target.closest("[data-filter-picker]");
+  if (!picker) return;
+  openSearchFilterPicker(picker.dataset.filterPicker, picker);
+});
+searchFilterPickerQuery?.addEventListener("input", renderSearchFilterPickerOptions);
+searchFilterPickerList?.addEventListener("click", (event) => {
+  const option = event.target.closest("[data-search-filter-value]");
+  if (!option) return;
+  applySearchFilterPickerValue(option.dataset.searchFilterValue ?? "");
+});
 csvImportFile?.addEventListener("change", () => importPartsCsvFile(csvImportFile.files?.[0]));
 
 tableHead.addEventListener("click", (event) => {
@@ -4688,13 +5898,216 @@ tableHead.addEventListener("input", (event) => {
 
 navItems.forEach((button) => {
   button.addEventListener("click", () => {
-    activeNavMode = button.dataset.navMode;
-    if (activeNavMode === "create") {
-      activeCreateMode = "hub";
-    }
-    applyNavMode(activeNavMode);
-    renderApp();
+    openWorkspaceTab(button.dataset.navMode, {}, { activate: true });
   });
+});
+
+document.querySelector("#sidebarToggle")?.addEventListener("click", () => {
+  setSidebarOpen(!sidebarOpen);
+});
+
+document.querySelector("#navBackBtn")?.addEventListener("click", () => navigateTabHistory(-1));
+document.querySelector("#navForwardBtn")?.addEventListener("click", () => navigateTabHistory(1));
+document.querySelector("#tabSearchAdd")?.addEventListener("click", () => openSearchModal());
+
+tabListEl?.addEventListener("click", (event) => {
+  const closeBtn = event.target.closest("[data-close-tab]");
+  if (closeBtn) {
+    event.stopPropagation();
+    closeWorkspaceTab(closeBtn.dataset.closeTab);
+    return;
+  }
+  const tabEl = event.target.closest("[data-tab-id]");
+  if (tabEl) {
+    if (splitViewEnabled && activeTabId && tabEl.dataset.tabId !== activeTabId) {
+      secondaryTabId = activeTabId;
+    }
+    activateWorkspaceTab(tabEl.dataset.tabId);
+  }
+});
+
+tabListEl?.addEventListener("dragstart", (event) => {
+  const tabEl = event.target.closest("[data-tab-id]");
+  if (!tabEl || event.target.closest("[data-close-tab]")) {
+    event.preventDefault();
+    return;
+  }
+  tabDragId = tabEl.dataset.tabId;
+  tabEl.classList.add("dragging");
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", tabDragId);
+  if (workspaceTabs.length >= 2) {
+    showSplitDropOverlay(true);
+  }
+});
+
+tabListEl?.addEventListener("dragend", () => {
+  tabListEl.querySelectorAll(".workspaceTab.dragging").forEach((el) => el.classList.remove("dragging"));
+  tabDragId = null;
+  showSplitDropOverlay(false);
+});
+
+tabListEl?.addEventListener("dragover", (event) => {
+  const target = event.target.closest("[data-tab-id]");
+  if (!tabDragId || !target || target.dataset.tabId === tabDragId) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+});
+
+tabListEl?.addEventListener("drop", (event) => {
+  const target = event.target.closest("[data-tab-id]");
+  if (!tabDragId || !target || target.dataset.tabId === tabDragId) return;
+  event.preventDefault();
+  const rect = target.getBoundingClientRect();
+  const placeAfter = event.clientX > rect.left + rect.width / 2;
+  reorderWorkspaceTab(tabDragId, target.dataset.tabId, placeAfter);
+  tabDragId = null;
+  showSplitDropOverlay(false);
+});
+
+document.querySelector("#splitDropOverlay")?.addEventListener("dragover", (event) => {
+  if (!tabDragId || workspaceTabs.length < 2) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  const zone = event.target.closest("[data-split-side]");
+  document.querySelectorAll(".splitDropZone").forEach((el) => {
+    el.classList.toggle("is-target", el === zone);
+  });
+});
+
+document.querySelector("#splitDropOverlay")?.addEventListener("dragleave", (event) => {
+  if (!event.currentTarget.contains(event.relatedTarget)) {
+    document.querySelectorAll(".splitDropZone").forEach((el) => el.classList.remove("is-target"));
+  }
+});
+
+document.querySelector("#splitDropOverlay")?.addEventListener("drop", (event) => {
+  const zone = event.target.closest("[data-split-side]");
+  if (!tabDragId || !zone) return;
+  event.preventDefault();
+  const draggedId = tabDragId;
+  tabDragId = null;
+  showSplitDropOverlay(false);
+  applyTabSplit(draggedId, zone.dataset.splitSide);
+});
+
+appSidebar?.addEventListener("click", (event) => {
+  const action = event.target.closest("[data-sidebar-action]");
+  if (action) {
+    const kind = action.dataset.sidebarAction;
+    if (kind === "home") {
+      sidebarMode = "home";
+      renderSidebarChrome();
+      return;
+    }
+    if (kind === "create") {
+      openCreateModal("hub");
+      return;
+    }
+    if (kind === "inbox") {
+      sidebarMode = "inbox";
+      renderSidebarChrome();
+      return;
+    }
+    if (kind === "search") {
+      openSearchModal();
+      return;
+    }
+  }
+
+  const library = event.target.closest("[data-open-tab]");
+  if (library) {
+    openWorkspaceTab(library.dataset.openTab, {}, { activate: true });
+    return;
+  }
+
+  const toggleProject = event.target.closest("[data-toggle-project]");
+  if (toggleProject) {
+    const name = toggleProject.dataset.toggleProject;
+    if (collapsedProjectFolders.has(name)) {
+      collapsedProjectFolders.delete(name);
+    } else {
+      collapsedProjectFolders.add(name);
+    }
+    saveCollapsedProjects();
+    renderProjectsTree();
+    return;
+  }
+
+  const openPart = event.target.closest("[data-open-part]");
+  if (openPart) {
+    moveToPart(openPart.dataset.openPart);
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const closeModal = event.target.closest("[data-close-modal]");
+  if (closeModal) {
+    if (closeModal.dataset.closeModal === "create") closeCreateModal();
+    if (closeModal.dataset.closeModal === "search") closeSearchModal();
+    return;
+  }
+
+  const focusTab = event.target.closest("[data-focus-tab]");
+  if (focusTab) {
+    const nextId = focusTab.dataset.focusTab;
+    if (splitViewEnabled && activeTabId && nextId !== activeTabId) {
+      secondaryTabId = activeTabId;
+    }
+    activateWorkspaceTab(nextId);
+    return;
+  }
+
+  if (event.target.closest("[data-unsplit-view]")) {
+    clearSplitView();
+    return;
+  }
+
+  const searchSelect = event.target.closest("[data-search-select]");
+  if (searchSelect) {
+    searchModalSelection = searchSelect.dataset.searchSelect;
+    renderSearchModalResults();
+    return;
+  }
+
+  const searchOpen = event.target.closest("[data-search-open]");
+  if (searchOpen) {
+    moveToPart(searchOpen.dataset.searchOpen);
+  }
+});
+
+createModal?.addEventListener("click", (event) => {
+  const createModeButton = event.target.closest("[data-create-mode]");
+  if (createModeButton) {
+    activeCreateMode = createModeButton.dataset.createMode;
+    renderCreateModalBody();
+    return;
+  }
+  const createButton = event.target.closest("[data-submit-create]");
+  if (createButton) {
+    createPartFromForm();
+    closeCreateModal();
+    return;
+  }
+  const revisionButton = event.target.closest("[data-submit-revision]");
+  if (revisionButton) {
+    createRevisionFromForm();
+    closeCreateModal();
+    return;
+  }
+  const projectButton = event.target.closest("[data-submit-project]");
+  if (projectButton) {
+    createProjectFromForm().then(() => closeCreateModal()).catch((error) => {
+      statusMessage = `Project create failed: ${error.message}`;
+      renderCreateModalBody();
+    });
+  }
+});
+
+searchInput?.addEventListener("input", () => {
+  if (!searchModal?.hidden) {
+    renderSearchModalResults();
+  }
 });
 
 partsList.addEventListener("click", (event) => {
@@ -4815,18 +6228,36 @@ partsList.addEventListener("click", (event) => {
   const themeModeButton = event.target.closest("[data-theme-mode]");
   if (themeModeButton) {
     activeColorScheme = themeModeButton.dataset.themeMode;
-    applyAppearance(activeColorScheme, activeAccentColor);
+    applyAppearance(activeColorScheme);
     localStorage.setItem("peakColorScheme", activeColorScheme);
     renderApp();
     return;
   }
 
-  const accentColorButton = event.target.closest("[data-accent-color]");
-  if (accentColorButton) {
-    activeAccentColor = accentColorButton.dataset.accentColor;
-    applyAppearance(activeColorScheme, activeAccentColor);
-    localStorage.setItem("peakAccentColor", activeAccentColor);
+  const copyLinkButton = event.target.closest("[data-copy-link]");
+  if (copyLinkButton) {
+    const value = copyLinkButton.dataset.copyLink || "";
+    if (value && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(value).then(() => {
+        statusMessage = "Link copied";
+        renderApp();
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  const gateJumpButton = event.target.closest("[data-gate-jump]");
+  if (gateJumpButton) {
+    activePropertyTab = "overview";
+    activePartEditMode = true;
+    activeAttachmentEditMode = false;
     renderApp();
+    const field = gateJumpButton.dataset.gateJump;
+    const target = document.querySelector(`[data-open-part-field="${field}"]`);
+    if (target) {
+      target.focus();
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
     return;
   }
 
@@ -4908,6 +6339,7 @@ function enableBomColumnResizing() {
     const width = saved[key] || bomColumnDefinitions[key].width;
     grid.style.setProperty(`--bom-col-${index + 1}`, `${width}px`);
   });
+  fitBomItemColumnWidth(grid, saved);
   handles.forEach((handle) => {
     if (handle.dataset.resizeReady === "true") {
       return;
@@ -4940,6 +6372,36 @@ function enableBomColumnResizing() {
       handle.addEventListener("pointerup", onUp);
     });
   });
+}
+
+function fitBomItemColumnWidth(grid, saved = loadBomColumnWidths()) {
+  const itemIndex = activeBomColumnOrder.indexOf("item");
+  if (itemIndex < 0 || !grid) return;
+  const cells = [...grid.querySelectorAll(".bomNode")]
+    .map((node) => node.children[itemIndex])
+    .filter(Boolean);
+  if (!cells.length) return;
+  let needed = bomColumnDefinitions.item.width;
+  cells.forEach((cell) => {
+    const previous = {
+      overflow: cell.style.overflow,
+      width: cell.style.width,
+      minWidth: cell.style.minWidth,
+      maxWidth: cell.style.maxWidth
+    };
+    cell.style.overflow = "visible";
+    cell.style.width = "max-content";
+    cell.style.minWidth = "max-content";
+    cell.style.maxWidth = "none";
+    needed = Math.max(needed, Math.ceil(cell.getBoundingClientRect().width) + 4);
+    cell.style.overflow = previous.overflow;
+    cell.style.width = previous.width;
+    cell.style.minWidth = previous.minWidth;
+    cell.style.maxWidth = previous.maxWidth;
+  });
+  const current = Number(saved.item) || bomColumnDefinitions.item.width;
+  const width = Math.max(current, needed);
+  grid.style.setProperty(`--bom-col-${itemIndex + 1}`, `${width}px`);
 }
 
 function enableBomColumnReordering() {
@@ -5011,15 +6473,19 @@ function enablePaneResizing() {
         const workspaceWidth = workspace.getBoundingClientRect().width;
         const isPartWorkspace = workspace.classList.contains("partWorkspace");
         const maxWidth = isPartWorkspace
-          ? workspaceWidth * 0.5
+          ? workspaceWidth * 0.75
           : workspace.classList.contains("homeWorkspace") && window.matchMedia("(max-width: 1120px)").matches
             ? Math.max(160, workspaceWidth - 260)
             : 600;
-        const width = clamp(startWidth + e.clientX - startX, 140, maxWidth);
-        workspace.style.setProperty("--nav-width", `${width}px`);
+        const minWidth = isPartWorkspace ? Math.max(180, workspaceWidth * 0.2) : 140;
+        const width = clamp(startWidth + e.clientX - startX, minWidth, maxWidth);
         if (isPartWorkspace && workspaceWidth > 0) {
-          activeBomPaneWidthRatio = clamp(width / workspaceWidth, 0.1, 0.5);
-          localStorage.setItem("peakBomPaneWidthRatio", String(activeBomPaneWidthRatio));
+          activeBomPaneWidthRatio = clamp(width / workspaceWidth, 0.2, 0.75);
+          localStorage.setItem("peakBomPaneRatio", String(activeBomPaneWidthRatio));
+          workspace.style.setProperty("--nav-width", `${(activeBomPaneWidthRatio * 100).toFixed(1)}%`);
+          workspace.style.gridTemplateColumns = "minmax(180px, var(--nav-width)) 6px minmax(0, 1fr)";
+        } else {
+          workspace.style.setProperty("--nav-width", `${width}px`);
         }
       }
     };
@@ -5060,11 +6526,67 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function enableSidebarResizing() {
+  const resizer = document.querySelector("#sidebarResizer");
+  if (!resizer || resizer.dataset.bound === "1") {
+    return;
+  }
+  resizer.dataset.bound = "1";
+
+  function sidebarMaxWidth() {
+    return Math.floor(window.innerWidth * 0.5);
+  }
+
+  function applySidebarWidth(width) {
+    if (!appSidebar) return;
+    const next = clamp(width, 160, sidebarMaxWidth());
+    appSidebar.style.width = `${next}px`;
+    localStorage.setItem("peakSidebarWidth", String(next));
+  }
+
+  const savedWidth = Number(localStorage.getItem("peakSidebarWidth") || "0");
+  if (savedWidth >= 160) {
+    applySidebarWidth(savedWidth);
+  } else {
+    applySidebarWidth(Math.floor(window.innerWidth * 0.18));
+  }
+
+  window.addEventListener("resize", () => {
+    if (!appSidebar?.classList.contains("open")) return;
+    const current = appSidebar.getBoundingClientRect().width;
+    if (current > sidebarMaxWidth()) {
+      applySidebarWidth(sidebarMaxWidth());
+    }
+  });
+
+  resizer.addEventListener("pointerdown", (event) => {
+    if (!appSidebar?.classList.contains("open")) {
+      return;
+    }
+    event.preventDefault();
+    resizer.setPointerCapture(event.pointerId);
+    document.body.classList.add("isResizing");
+    const startX = event.clientX;
+    const startWidth = appSidebar.getBoundingClientRect().width;
+
+    function onMove(moveEvent) {
+      applySidebarWidth(startWidth + moveEvent.clientX - startX);
+    }
+
+    function onUp() {
+      document.body.classList.remove("isResizing");
+      resizer.removeEventListener("pointermove", onMove);
+      resizer.removeEventListener("pointerup", onUp);
+    }
+
+    resizer.addEventListener("pointermove", onMove);
+    resizer.addEventListener("pointerup", onUp);
+  });
+}
+
 function runAction(action) {
   if (action === "create-part") {
-    activeNavMode = "create";
-    applyNavMode("create");
-    renderApp();
+    openCreateModal("hub");
   }
   if (action === "link-drive") {
     linkExternalRecord("documents");
@@ -5115,7 +6637,7 @@ function createPartFromForm() {
     }
     statusMessage = `${preflight} Created draft ${values.partNumber}^${values.revision}; open and save the draft to push through the local runner.`;
     renderProjectOptions();
-    moveToPart(`${values.partNumber}^${values.revision}`);
+    moveToPart(`${values.partNumber}^${values.revision}`, { editMode: true });
   }
 }
 
@@ -5181,7 +6703,7 @@ function createRevisionFromForm() {
   const created = createRevisionRecord(source, revision);
   if (created) {
     statusMessage = `${preflight} Created draft ${partNumber}^${revision}; open and save the draft to push through the local runner.`;
-    moveToPart(`${partNumber}^${revision}`);
+    moveToPart(`${partNumber}^${revision}`, { editMode: true });
   }
 }
 
@@ -6707,7 +8229,7 @@ function removeUndefinedFields(value) {
 
 function loadBomColumnWidths() {
   try {
-    const widths = JSON.parse(localStorage.getItem("peakBomColumnWidthsV3") || "{}");
+    const widths = JSON.parse(localStorage.getItem("peakBomColumnWidthsV5") || "{}");
     return widths && typeof widths === "object" && !Array.isArray(widths) ? widths : {};
   } catch {
     return {};
@@ -6716,7 +8238,7 @@ function loadBomColumnWidths() {
 
 function saveBomColumnWidth(key, width) {
   if (!bomColumnDefinitions[key] || !Number.isFinite(width)) return;
-  localStorage.setItem("peakBomColumnWidthsV3", JSON.stringify({ ...loadBomColumnWidths(), [key]: width }));
+  localStorage.setItem("peakBomColumnWidthsV5", JSON.stringify({ ...loadBomColumnWidths(), [key]: width }));
 }
 
 function loadBomColumnOrder() {
@@ -6731,8 +8253,8 @@ function loadBomColumnOrder() {
 }
 
 function loadBomPaneWidthRatio() {
-  const ratio = Number(localStorage.getItem("peakBomPaneWidthRatio"));
-  return Number.isFinite(ratio) && ratio >= 0.1 && ratio <= 0.5 ? ratio : 0.25;
+  const ratio = Number(localStorage.getItem("peakBomPaneRatio"));
+  return Number.isFinite(ratio) && ratio >= 0.2 && ratio <= 0.75 ? ratio : 0.5;
 }
 
 function loadProjects() {
@@ -6760,6 +8282,9 @@ function onshapeDocumentIdFromUrl(url) {
 }
 
 function renderSearchSuggestions() {
+  if (!searchSuggestions || !searchInput) {
+    return;
+  }
   if (!openedPartNumber) {
     searchSuggestions.classList.remove("visible");
     searchSuggestions.innerHTML = "";
@@ -6797,10 +8322,25 @@ objectTable.addEventListener("click", (event) => {
 
 loadParts()
   .then(() => {
-    renderApp();
+    setSidebarOpen(sidebarOpen);
+    sidebarMode = "home";
+    if (!workspaceTabs.length) {
+      const params = new URLSearchParams(window.location.search);
+      const objectId = params.get("object") || params.get("part");
+      if (objectId && findPartByKey(objectId)) {
+        openWorkspaceTab("part", { objectId, editMode: params.get("edit") === "1" }, { activate: true });
+      } else {
+        renderApp();
+      }
+    } else {
+      renderApp();
+    }
   })
   .catch((error) => {
-    recordCount.textContent = "PEAK data unavailable";
-    partsList.innerHTML = '<tr><td class="emptyCell" colspan="6">Could not load part records</td></tr>';
-    partDetail.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    setSidebarOpen(sidebarOpen);
+    sidebarMode = "home";
+    if (recordCount) recordCount.textContent = "PEAK data unavailable";
+    if (partsList) partsList.innerHTML = '<tr><td class="emptyCell" colspan="6">Could not load part records</td></tr>';
+    if (partDetail) partDetail.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+    renderApp();
   });

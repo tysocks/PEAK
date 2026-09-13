@@ -1,0 +1,112 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  color-scheme: dark;
+  --peak-base-font-size: 14px;
+  --peak-font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --peak-mono-family: "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  /* Notion dark (from NOVA) */
+  --peak-ui-bg: #202020;
+  --peak-sidebar-bg: #202020;
+  --peak-view-bg: #191919;
+  --peak-accent: #6f6f6f;
+  --peak-text: rgba(255, 255, 255, 0.9);
+  --peak-text-dim: rgba(255, 255, 255, 0.44);
+  --peak-divider: rgba(255, 255, 255, 0.09);
+  --peak-hover: rgba(255, 255, 255, 0.055);
+  --peak-active: rgba(255, 255, 255, 0.11);
+  --peak-line: rgba(255, 255, 255, 0.16);
+  --peak-surface: #252525;
+  --peak-elevated: #2f2f2f;
+  --peak-input-bg: #2f2f2f;
+  --peak-btn-bg: rgba(255, 255, 255, 0.055);
+  --peak-shadow: 0 14px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --peak-radius-xs: 4px;
+  --peak-radius-sm: 6px;
+  --peak-radius-md: 8px;
+  --peak-radius-lg: 10px;
+  --peak-warning: #d97706;
+  --peak-danger: #eb5757;
+  --peak-success: #4dab9a;
+  --peak-info: #60a5fa;
+
+  /* Legacy aliases used across existing PEAK CSS/JS */
+  --bg: var(--peak-view-bg);
+  --chrome: var(--peak-ui-bg);
+  --chrome-strong: var(--peak-surface);
+  --chrome-raised: var(--peak-elevated);
+  --rail: var(--peak-sidebar-bg);
+  --rail-active: var(--peak-active);
+  --border: var(--peak-divider);
+  --border-strong: var(--peak-line);
+  --text: var(--peak-text);
+  --muted: var(--peak-text-dim);
+  --muted-strong: rgba(255, 255, 255, 0.65);
+  --accent: var(--peak-text);
+  --accent-soft: var(--peak-hover);
+  --row-hover: var(--peak-hover);
+  --selected: var(--peak-active);
+  --warning: var(--peak-warning);
+  --danger: var(--peak-danger);
+  --shadow: var(--peak-shadow);
+  --surface-bar: var(--peak-ui-bg);
+  --surface-popup: var(--peak-elevated);
+  --surface-pane: var(--peak-view-bg);
+  --surface-header: var(--peak-ui-bg);
+  --input-bg: var(--peak-input-bg);
+  --btn-bg: var(--peak-btn-bg);
+  --card-bg: transparent;
+  --reference-bg: transparent;
+  --track-bg: var(--peak-hover);
+  --resize-bg: transparent;
+}
+
+html.light-mode {
+  color-scheme: light;
+  --peak-ui-bg: #ffffff;
+  --peak-sidebar-bg: #f7f6f3;
+  --peak-view-bg: #ffffff;
+  --peak-accent: #787774;
+  --peak-text: rgba(55, 53, 47, 0.95);
+  --peak-text-dim: rgba(55, 53, 47, 0.5);
+  --peak-divider: rgba(55, 53, 47, 0.09);
+  --peak-hover: rgba(55, 53, 47, 0.06);
+  --peak-active: rgba(55, 53, 47, 0.1);
+  --peak-line: rgba(55, 53, 47, 0.16);
+  --peak-surface: #ffffff;
+  --peak-elevated: #ffffff;
+  --peak-input-bg: #ffffff;
+  --peak-btn-bg: rgba(55, 53, 47, 0.06);
+  --peak-shadow: 0 14px 40px rgba(15, 15, 15, 0.12), 0 0 0 1px rgba(55, 53, 47, 0.08);
+  --peak-warning: #b45309;
+  --peak-danger: #eb5757;
+  --peak-success: #0f766e;
+  --peak-info: #3b82f6;
+
+  --muted-strong: rgba(55, 53, 47, 0.7);
+}
+
+html {
+  font-size: var(--peak-base-font-size);
+  height: 100%;
+}
+
+html,
+body {
+  height: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--peak-font-family);
+  font-size: 1rem;
+  letter-spacing: -0.003em;
+  -webkit-font-smoothing: antialiased;
+  background: var(--peak-view-bg);
+  color: var(--peak-text);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
