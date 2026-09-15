@@ -81,13 +81,12 @@ let activePropertyTab = "overview";
 let partAsidePanel = null; // "info" | null
 let partOptionsMenuOpen = false;
 let partOptionsSearchQuery = "";
-let activeAttachmentDraftCount = 0;
 let activeTableSort = { column: "part_number", direction: "asc" };
 let tableColumnFilters = {};
-let activeHistorySort = { column: "performed_at", direction: "desc" };
-let historyColumnFilters = {};
 let collapsedBomNodes = new Set();
 let bomPickerTargetId = "";
+let alternateEditDraft = null;
+let attachmentEditDraft = null;
 let activeBomPaneWidthRatio = loadBomPaneWidthRatio();
 const bomColumnDefinitions = {
   item: { label: "Item", width: 260 },
@@ -125,6 +124,7 @@ let splitViewEnabled = false;
 let sidebarOpen = localStorage.getItem("peakSidebarOpen") !== "0";
 let sidebarMode = "home";
 let favoritePartKeys = loadFavorites();
+let favoriteProjectNames = loadFavoriteProjects();
 let expandedProjectFolders = loadExpandedProjects();
 let expandedSidebarBomNodes = loadExpandedSidebarBomNodes();
 let searchModalSelection = null;
@@ -186,20 +186,6 @@ const tabularColumns = [
   { key: "bom", label: "BOM Items", value: (part) => asArray(part.bom).length }
 ];
 
-const historyColumns = [
-  { key: "performed_at", label: "Performed", value: (row) => row.performed_at },
-  { key: "action", label: "Action", value: (row) => activityActionLabel(row.action) },
-  { key: "actor", label: "User", value: (row) => row.actor },
-  { key: "part_number", label: "Part No", value: (row) => row.part_number },
-  { key: "revision", label: "Rev", value: (row) => row.revision },
-  { key: "object_id", label: "Part ID", value: (row) => row.object_id },
-  { key: "name", label: "Name", value: (row) => row.name },
-  { key: "project", label: "Project", value: (row) => row.project },
-  { key: "state", label: "Revision Status", value: (row) => row.state },
-  { key: "maturity", label: "Maturity", value: (row) => row.maturity },
-  { key: "detail", label: "Detail", value: (row) => row.detail }
-];
-
 const revisionWorkflowStates = ["draft", "release_candidate", "released", "obsolete"];
 const maturityWorkflowStates = ["development", "npi", "production", "sunset", "obsolete"];
 
@@ -228,6 +214,19 @@ function loadFavorites() {
 
 function saveFavorites() {
   localStorage.setItem("peakFavorites", JSON.stringify(favoritePartKeys));
+}
+
+function loadFavoriteProjects() {
+  try {
+    const values = JSON.parse(localStorage.getItem("peakFavoriteProjects") || "[]");
+    return Array.isArray(values) ? values.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFavoriteProjects() {
+  localStorage.setItem("peakFavoriteProjects", JSON.stringify(favoriteProjectNames));
 }
 
 function loadExpandedProjects() {
@@ -279,9 +278,7 @@ function tabTitleFor(type, payload = {}) {
   const titles = {
     home: "Browse",
     projects: "Projects",
-    history: "History",
     table: "Table",
-    report: "Report",
     settings: "Settings"
   };
   return titles[type] || "Tab";
@@ -299,12 +296,45 @@ function findTabByType(type, objectId = "") {
   });
 }
 
-function openWorkspaceTab(type, payload = {}, { activate = true, forceNew = false } = {}) {
+function openWorkspaceTab(type, payload = {}, { activate = true, forceNew = false, replaceActive = false } = {}) {
   if (type === "settings") {
     openSettingsModal(payload.section || "profile");
     return null;
   }
-  let tab = forceNew ? null : findTabByType(type, payload.objectId || "");
+  if (type === "history" || type === "report") {
+    return null;
+  }
+  let tab = null;
+  if (forceNew) {
+    tab = {
+      id: newTabId(type),
+      type,
+      title: tabTitleFor(type, payload),
+      payload: { ...payload }
+    };
+    workspaceTabs.push(tab);
+  } else if (replaceActive) {
+    const existing = findTabByType(type, payload.objectId || "");
+    if (existing) {
+      tab = existing;
+      tab.payload = { ...tab.payload, ...payload };
+      tab.title = tabTitleFor(type, tab.payload);
+    } else {
+      const active = activeTabId ? findTab(activeTabId) : null;
+      if (active) {
+        tab = active;
+        tab.type = type;
+        tab.payload = { ...payload };
+        tab.title = tabTitleFor(type, tab.payload);
+      }
+    }
+  } else {
+    tab = findTabByType(type, payload.objectId || "");
+    if (tab) {
+      tab.payload = { ...tab.payload, ...payload };
+      tab.title = tabTitleFor(type, tab.payload);
+    }
+  }
   if (!tab) {
     tab = {
       id: newTabId(type),
@@ -313,9 +343,6 @@ function openWorkspaceTab(type, payload = {}, { activate = true, forceNew = fals
       payload: { ...payload }
     };
     workspaceTabs.push(tab);
-  } else {
-    tab.payload = { ...tab.payload, ...payload };
-    tab.title = tabTitleFor(type, tab.payload);
   }
   if (activate) {
     activateWorkspaceTab(tab.id);
@@ -323,6 +350,10 @@ function openWorkspaceTab(type, payload = {}, { activate = true, forceNew = fals
     renderTabBar();
   }
   return tab;
+}
+
+function isNewTabModifierClick(event) {
+  return Boolean(event && (event.ctrlKey || event.metaKey));
 }
 
 function pushTabHistory(tabId) {
@@ -465,13 +496,16 @@ function applyTabToWorkspace(tab) {
     activePartEditMode = Boolean(tab.payload?.editMode);
     activeAttachmentEditMode = false;
     activeAlternateEditMode = false;
-    activeAttachmentDraftCount = 0;
+    clearAlternateEditDraft();
+    clearAttachmentEditDraft();
   } else {
     openedPartNumber = null;
     selectedBomPartNumber = null;
     activePartEditMode = false;
     activeAttachmentEditMode = false;
     activeAlternateEditMode = false;
+    clearAlternateEditDraft();
+    clearAttachmentEditDraft();
   }
   if (tab.type === "projects" && tab.payload?.projectName) {
     selectedProjectName = tab.payload.projectName;
@@ -479,6 +513,27 @@ function applyTabToWorkspace(tab) {
 }
 
 function renderTabBar() {
+  const removedTabs = workspaceTabs.filter((tab) => tab.type === "history" || tab.type === "report");
+  if (removedTabs.length) {
+    const removedIds = new Set(removedTabs.map((tab) => tab.id));
+    workspaceTabs = workspaceTabs.filter((tab) => !removedIds.has(tab.id));
+    removedIds.forEach((id) => pruneTabHistory(id));
+    if (secondaryTabId && removedIds.has(secondaryTabId)) {
+      secondaryTabId = null;
+      splitViewEnabled = false;
+    }
+    if (activeTabId && removedIds.has(activeTabId)) {
+      activeTabId = workspaceTabs[0]?.id || null;
+      if (activeTabId) {
+        activateWorkspaceTab(activeTabId, { skipHistory: true });
+        return;
+      }
+      renderEmptyWorkspace();
+    }
+  }
+  workspaceTabs.forEach((tab) => {
+    tab.title = tabTitleFor(tab.type, tab.payload || {});
+  });
   if (!tabListEl) return;
   tabListEl.innerHTML = workspaceTabs.map((tab) => `
     <div class="workspaceTab${tab.id === activeTabId ? " active" : ""}${splitViewEnabled && tab.id === secondaryTabId ? " is-secondary" : ""}" role="tab" aria-selected="${tab.id === activeTabId}" data-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}" draggable="true">
@@ -603,14 +658,23 @@ function renderSidebarChrome() {
 
 function renderFavoritesList() {
   if (!favoritesListEl) return;
-  const items = favoritePartKeys
+  const favoriteParts = favoritePartKeys
     .map((key) => findPartByKey(key))
     .filter(Boolean);
-  if (!items.length) {
-    favoritesListEl.innerHTML = `<p class="sidebarEmpty">Pin parts from the context menu.</p>`;
+  const favoriteProjects = favoriteProjectNames.filter((name) => projects().includes(name));
+  if (!favoriteParts.length && !favoriteProjects.length) {
+    favoritesListEl.innerHTML = `<p class="sidebarEmpty">Pin parts or projects from the star button.</p>`;
     return;
   }
-  favoritesListEl.innerHTML = items.map((part) => {
+  const projectItems = favoriteProjects.map((project) => {
+    const active = activeNavMode === "projects" && selectedProjectName === project;
+    return `
+      <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-project="${escapeHtml(project)}">
+        <span class="sidebarItemLabel">${escapeHtml(project)}</span>
+      </button>
+    `;
+  }).join("");
+  const partItems = favoriteParts.map((part) => {
     const key = partKey(part);
     const active = activeNavMode === "part" && openedPartNumber === key;
     return `
@@ -619,6 +683,7 @@ function renderFavoritesList() {
       </button>
     `;
   }).join("");
+  favoritesListEl.innerHTML = `${projectItems}${partItems}`;
 }
 
 function projectBomForest(projectName) {
@@ -756,6 +821,33 @@ function toggleFavorite(partKeyValue) {
   }
   saveFavorites();
   renderFavoritesList();
+}
+
+function toggleProjectFavorite(projectName) {
+  const name = String(projectName || "");
+  if (!name) return;
+  if (favoriteProjectNames.includes(name)) {
+    favoriteProjectNames = favoriteProjectNames.filter((item) => item !== name);
+  } else {
+    favoriteProjectNames = [name, ...favoriteProjectNames];
+  }
+  saveFavoriteProjects();
+  renderFavoritesList();
+}
+
+function openFavoriteProject(projectName, { newTab = false } = {}) {
+  const name = String(projectName || "");
+  if (!name || !projects().includes(name)) return;
+  selectedProjectName = name;
+  activeProjectEditMode = false;
+  partAsidePanel = null;
+  partOptionsMenuOpen = false;
+  openWorkspaceTab("projects", { projectName: name }, {
+    activate: true,
+    forceNew: newTab,
+    replaceActive: !newTab
+  });
+  renderApp();
 }
 
 function openCreateModal(mode = "new", seed = null) {
@@ -924,9 +1016,11 @@ function closeSearchFilterPicker() {
 
 function openSearchFilterPicker(type, anchor) {
   if (!searchFilterPicker || !anchor) return;
-  const nextBomTarget = type === "bomItem" ? (anchor.dataset.bomPickItem || "") : "";
+  const nextItemTarget = (type === "bomItem" || type === "alternateItem")
+    ? (anchor.dataset.bomPickItem || anchor.dataset.alternatePickItem || "")
+    : "";
   if (searchFilterPickerType === type && !searchFilterPicker.hidden) {
-    if (type !== "bomItem" || bomPickerTargetId === nextBomTarget) {
+    if ((type !== "bomItem" && type !== "alternateItem") || bomPickerTargetId === nextItemTarget) {
       closeSearchFilterPicker();
       return;
     }
@@ -943,18 +1037,18 @@ function openSearchFilterPicker(type, anchor) {
       ? "Filter people…"
       : type === "project"
         ? "Filter projects…"
-        : type === "basedOn" || type === "bomItem"
+        : type === "basedOn" || type === "bomItem" || type === "alternateItem"
           ? "Filter items…"
           : "Filter assemblies…";
   }
-  if (type === "bomItem") {
-    bomPickerTargetId = nextBomTarget;
+  if (type === "bomItem" || type === "alternateItem") {
+    bomPickerTargetId = nextItemTarget;
   } else {
     bomPickerTargetId = "";
   }
   renderSearchFilterPickerOptions();
   const rect = anchor.getBoundingClientRect();
-  const width = (type === "basedOn" || type === "bomItem")
+  const width = (type === "basedOn" || type === "bomItem" || type === "alternateItem")
     ? Math.max(280, Math.min(420, rect.width || 280))
     : 260;
   searchFilterPicker.style.width = `${width}px`;
@@ -1018,6 +1112,22 @@ function renderSearchFilterPickerOptions() {
       const part = latestRevisionForPart(option.value) || findPartByKey(option.value);
       return part && partKey(part) !== rootKey;
     });
+  } else if (searchFilterPickerType === "alternateItem") {
+    const source = getOpenedPart() || getSelectedBomPart();
+    const sourceNumber = canonicalPartNumber(source?.part_number);
+    const selected = new Set(
+      (alternateEditDraft || [])
+        .map((row) => canonicalPartNumber(row.partNumber))
+        .filter(Boolean)
+    );
+    options = basedOnPickerOptions().filter((option) => {
+      const partNumber = canonicalPartNumber(option.value);
+      if (!partNumber || partNumber === sourceNumber) return false;
+      const row = (alternateEditDraft || []).find((entry) => entry.id === bomPickerTargetId);
+      const current = canonicalPartNumber(row?.partNumber);
+      if (selected.has(partNumber) && partNumber !== current) return false;
+      return true;
+    });
   }
   const filtered = options.filter((option) => !query || option.label.toLowerCase().includes(query));
   const selectedValue = searchFilterPickerType === "createdBy"
@@ -1028,6 +1138,8 @@ function renderSearchFilterPickerOptions() {
         ? searchProject
         : searchFilterPickerType === "basedOn"
           ? (document.querySelector("#newPartBasedOn")?.value || "")
+          : searchFilterPickerType === "alternateItem"
+            ? ((alternateEditDraft || []).find((row) => row.id === bomPickerTargetId)?.partNumber || "")
           : (() => {
               const owner = findBomItemOwner(bomPickerTargetId);
               const child = resolveBomChild(owner?.item);
@@ -1056,6 +1168,10 @@ function applySearchFilterPickerValue(value) {
     return;
   } else if (searchFilterPickerType === "bomItem") {
     assignBomRowPart(bomPickerTargetId, value);
+    closeSearchFilterPicker();
+    return;
+  } else if (searchFilterPickerType === "alternateItem") {
+    assignAlternateDraftRow(bomPickerTargetId, value);
     closeSearchFilterPicker();
     return;
   }
@@ -1824,14 +1940,8 @@ function searchTitle() {
   if (activeNavMode === "projects") {
     return "Projects";
   }
-  if (activeNavMode === "history") {
-    return "History";
-  }
   if (activeNavMode === "table") {
     return "Parts Table";
-  }
-  if (activeNavMode === "report") {
-    return "Report";
   }
   if (activeNavMode === "settings") {
     return "Settings";
@@ -1849,16 +1959,8 @@ function renderMainRows(visibleParts) {
     renderProjectRows();
     return;
   }
-  if (activeNavMode === "history") {
-    renderHistoryRows(visibleParts);
-    return;
-  }
   if (activeNavMode === "table") {
     renderTabularRows(visibleParts);
-    return;
-  }
-  if (activeNavMode === "report") {
-    renderReportRows(visibleParts);
     return;
   }
   if (activeNavMode === "settings") {
@@ -1873,9 +1975,7 @@ function pageHeading() {
     home: "Search",
     create: "Create",
     projects: "Projects",
-    history: "History",
     table: "Table",
-    report: "Report",
     settings: "Settings"
   };
   return headings[activeNavMode] || "Search";
@@ -1886,9 +1986,7 @@ function pageDescription() {
     home: "Search all parts across every project.",
     create: "Create draft parts, revisions, and projects.",
     projects: "Browse project folders, owners, approvers, and part counts.",
-    history: "Review activity across every part revision.",
     table: "Review every part revision and property in a sortable table.",
-    report: "Select a report and review filtered registry results.",
     settings: "Configure local PEAK behavior for this workstation."
   };
   if (activeNavMode === "part") {
@@ -1901,9 +1999,7 @@ function pageNavigatorTitle() {
   const titles = {
     create: "Create",
     projects: "Projects",
-    history: "History",
     table: "Table",
-    report: "Reports",
     settings: "Settings"
   };
   return titles[activeNavMode] || "Navigator";
@@ -1919,14 +2015,8 @@ function pageStatus(visibleParts) {
   if (activeNavMode === "projects") {
     return `${parts.length} parts / ${projects().length} projects`;
   }
-  if (activeNavMode === "report") {
-    return `${visibleParts.length} records in report scope`;
-  }
   if (activeNavMode === "table") {
     return `${tabularParts(visibleParts).length} of ${visibleParts.length} table rows`;
-  }
-  if (activeNavMode === "history") {
-    return `${historyRows(visibleParts).length} history events`;
   }
   if (activeNavMode === "settings") {
     return "Local configuration";
@@ -1943,16 +2033,8 @@ function renderPageDetail() {
     renderProjectsDetail();
     return;
   }
-  if (activeNavMode === "history") {
-    renderHistoryDetail();
-    return;
-  }
   if (activeNavMode === "table") {
     renderTabularDetail();
-    return;
-  }
-  if (activeNavMode === "report") {
-    partDetail.innerHTML = `<section class="propertySection"><h3>Reports</h3><p class="description">Report rows use the same filters as search. Use the navigator to scope by lifecycle state.</p></section>`;
     return;
   }
   if (activeNavMode === "settings") {
@@ -2080,7 +2162,8 @@ function preventPartNavigationDuringEdit(targetIdentifier) {
   selectedBomPartNumber = openedPartNumber;
   activeAttachmentEditMode = false;
   activeAlternateEditMode = false;
-  activeAttachmentDraftCount = 0;
+  clearAlternateEditDraft();
+  clearAttachmentEditDraft();
   statusMessage = "Save or cancel the current part edit before opening another part";
   window.history.replaceState({}, "", partUrl(openedPartNumber, { editMode: true }));
   renderApp();
@@ -2226,111 +2309,6 @@ function tabularColumnValue(part, column) {
   return column.value(part) ?? "";
 }
 
-function renderHistoryRows(visibleParts) {
-  const rows = historyRows(visibleParts);
-  tableHead.innerHTML = `
-    <tr class="tabularHeaderRow">
-      ${historyColumns.map(historyHeaderCell).join("")}
-    </tr>
-  `;
-
-  if (!rows.length) {
-    partsList.innerHTML = `<tr><td class="emptyCell" colspan="${historyColumns.length}">No matching history events</td></tr>`;
-    return;
-  }
-
-  partsList.innerHTML = rows.map((row) => `
-    <tr class="objectRow tabularRow${row.object_id === selectedPartNumber ? " active" : ""}" data-part-number="${escapeHtml(row.object_id)}" data-history-part="${escapeHtml(row.object_id)}" tabindex="0">
-      ${historyColumns.map((column) => historyBodyCell(row, column)).join("")}
-    </tr>
-  `).join("");
-}
-
-function historyHeaderCell(column) {
-  const isSorted = activeHistorySort.column === column.key;
-  const direction = isSorted ? activeHistorySort.direction : "";
-  return `
-    <th scope="col" class="tabularHeaderCell">
-      <button class="tableSortButton${isSorted ? " active" : ""}" type="button" data-history-sort="${escapeHtml(column.key)}" aria-label="Sort ${escapeHtml(column.label)} ${direction === "asc" ? "descending" : "ascending"}">
-        <span>${escapeHtml(column.label)}</span>
-        <span class="tableSortIndicator" aria-hidden="true">${
-          direction === "asc"
-            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>`
-            : direction === "desc"
-            ? `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>`
-            : `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l4-4 4 4"/><path d="M16 15l-4 4-4-4"/></svg>`
-        }</span>
-      </button>
-      <input class="tableFilterInput" value="${escapeHtml(historyColumnFilters[column.key] || "")}" data-history-filter="${escapeHtml(column.key)}" placeholder="" aria-label="Filter ${escapeHtml(column.label)}">
-    </th>
-  `;
-}
-
-function historyBodyCell(row, column) {
-  const value = historyColumnValue(row, column);
-  const displayValue = column.key === "performed_at" ? formatActivityTimestamp(value) : value;
-  return `<td title="${escapeHtml(displayValue || "")}">${escapeHtml(displayValue || "")}</td>`;
-}
-
-function historyRows(sourceParts) {
-  const rows = sourceParts.flatMap((part) =>
-    activityHistoryForPart(part).map((activity) => ({
-      ...activity,
-      part_number: part.part_number,
-      revision: part.revision || "A",
-      object_id: partKey(part),
-      name: part.name || "",
-      project: part.project || "",
-      state: releaseStatusLabel(part),
-      maturity: maturityStageLabel(part)
-    }))
-  );
-  const filtered = rows.filter((row) =>
-    historyColumns.every((column) => {
-      const filter = String(historyColumnFilters[column.key] || "").trim().toLowerCase();
-      if (!filter) {
-        return true;
-      }
-      const value = column.key === "performed_at" ? formatActivityTimestamp(historyColumnValue(row, column)) : historyColumnValue(row, column);
-      return String(value || "").toLowerCase().includes(filter);
-    })
-  );
-  const sortColumn = historyColumns.find((column) => column.key === activeHistorySort.column) || historyColumns[0];
-  const direction = activeHistorySort.direction === "desc" ? -1 : 1;
-  return [...filtered].sort((a, b) => {
-    const aValue = historyColumnValue(a, sortColumn);
-    const bValue = historyColumnValue(b, sortColumn);
-    if (sortColumn.key === "performed_at") {
-      return String(aValue || "").localeCompare(String(bValue || "")) * direction;
-    }
-    const numeric = Number(aValue) - Number(bValue);
-    if (aValue !== "" && bValue !== "" && Number.isFinite(numeric)) {
-      return numeric * direction;
-    }
-    return String(aValue || "").localeCompare(String(bValue || ""), undefined, { numeric: true, sensitivity: "base" }) * direction;
-  });
-}
-
-function historyColumnValue(row, column) {
-  return column.value(row) ?? "";
-}
-
-function renderHistoryDetail() {
-  partDetail.innerHTML = `
-    <div class="tabularDetailLayout">
-      ${historyActionRail()}
-    </div>
-  `;
-}
-
-function historyActionRail() {
-  return `
-    <aside class="partActionRail" aria-label="History actions">
-      ${partActionButton("Pull Remote", "pull-main")}
-    </aside>
-  `;
-}
-
 function renderTabularDetail() {
   partDetail.innerHTML = `
     <div class="tabularDetailLayout">
@@ -2348,31 +2326,6 @@ function tabularActionRail() {
       ${partActionButton("Export PEAK JSON", "export-tabular-json")}
       ${partActionButton("Pull Main", "pull-main")}
     </aside>
-  `;
-}
-
-function renderReportRows(visibleParts) {
-  const projectCounts = countBy(visibleParts, "project");
-  const stateCounts = countBy(visibleParts.map((part) => ({ state: revisionStatusValue(part) })), "state");
-  const linkCount = visibleParts.reduce(
-    (total, part) => total + (part.documents ?? []).length + (part.onshape ?? []).length,
-    0
-  );
-  tableHead.innerHTML = `
-    <tr>
-      <th scope="col">Report</th>
-      <th scope="col">Value</th>
-      <th scope="col">Detail</th>
-      <th scope="col">Scope</th>
-      <th scope="col">Owner</th>
-      <th scope="col">Updated</th>
-    </tr>
-  `;
-  partsList.innerHTML = `
-    ${metricRow("Total Parts", visibleParts.length, `${parts.length} in registry`, "Current filters")}
-    ${metricRow("Lifecycle States", Object.keys(stateCounts).length, formatCounts(stateCounts, stateLabel), "Current filters")}
-    ${metricRow("Projects", Object.keys(projectCounts).length, formatCounts(projectCounts), "Current filters")}
-    ${metricRow("External Links", linkCount, "Google Drive and Onshape references", "Current filters")}
   `;
 }
 
@@ -2600,14 +2553,44 @@ function renderProjectsDetail() {
     partDetail.innerHTML = '<p class="empty">No project selected</p>';
     return;
   }
+  const editing = activeProjectEditMode;
+  const infoOpen = partAsidePanel === "info";
+  const isFavorite = favoriteProjectNames.includes(project);
+  const driveUrl = projectDriveUrl(project);
   partDetail.innerHTML = `
-    <div class="projectDetailLayout">
+    <div class="projectDetailLayout partDetailV2${infoOpen ? " panel-open" : ""}">
       <div class="partDetailMain">
-        ${renderProjectDetailBody(project)}
+        <header class="partDetailToolbar">
+          <div class="partDetailHeading">
+            <h2 class="partDetailName">${escapeHtml(project)}</h2>
+            <div class="partDetailLinkActions" aria-label="External links">
+              ${partActionButton("Open Google Drive", "open-project-drive", { disabled: !driveUrl })}
+            </div>
+          </div>
+          <div class="partDetailToolbarActions">
+            ${editing ? productEditUserLabel() : ""}
+            <button class="partToolBtn${infoOpen ? " active" : ""}" type="button" data-part-panel="info" title="Details" aria-label="Details" aria-pressed="${infoOpen}"></button>
+            <button class="partToolBtn partToolStar${isFavorite ? " active" : ""}" type="button" data-project-favorite="${escapeHtml(project)}" title="${isFavorite ? "Unfavorite" : "Favorite"}" aria-label="${isFavorite ? "Unfavorite" : "Favorite"}" aria-pressed="${isFavorite}"></button>
+            <div class="partOptionsWrap">
+              <button class="partToolBtn${partOptionsMenuOpen ? " active" : ""}" type="button" data-part-options-toggle title="Options" aria-label="Options" aria-expanded="${partOptionsMenuOpen}" aria-haspopup="menu"></button>
+              ${partOptionsMenuOpen ? renderProjectOptionsMenu(project) : ""}
+            </div>
+          </div>
+        </header>
+        <div class="partDetailBody notionScroll" data-notion-scroll>
+          <button class="notionScrollChevron up" type="button" data-scroll-dir="-1" hidden aria-label="Scroll up"></button>
+          <div class="partDetailScroll notionScrollViewport">
+            ${renderProjectDetailBody(project)}
+          </div>
+          <button class="notionScrollChevron down" type="button" data-scroll-dir="1" hidden aria-label="Scroll down"></button>
+        </div>
       </div>
-      ${projectActionRail(project)}
+      <div class="partAsideSlot" aria-hidden="${infoOpen ? "false" : "true"}">
+        ${renderProjectInfoPanel(project)}
+      </div>
     </div>
   `;
+  requestAnimationFrame(refreshNotionScrolls);
 }
 
 function projectGalleryRow(project) {
@@ -2632,33 +2615,96 @@ function projectGalleryRow(project) {
 
 function renderProjectDetailBody(project) {
   const editing = activeProjectEditMode;
+  const partCount = parts.filter((part) => part.project === project).length;
+  const draftCount = parts.filter((part) => part.project === project && isDraftRevision(part)).length;
+  const releasedCount = parts.filter((part) => part.project === project && releaseStatusLabel(part) === "Released").length;
+  const propertyRows = editing
+    ? [
+        propertyProjectEditInline("Project Code", "key", projectKey(project)),
+        propertyProjectEditInline("Owner", "owner", projectOwner(project)),
+        propertyProjectEditInline("Approvers", "approvers", projectApprovers(project).join(", ")),
+        propertyProjectEditInline("Google Drive Link", "drive_url", projectDriveUrl(project)),
+        propertyProjectToggleInline("Allow Custom Part Numbers", "allow_custom_part_numbers", projectAllowsCustomPartNumbers(project)),
+        propertyProjectEditInline("Description", "description", projectDescription(project), { textarea: true })
+      ]
+    : [
+        assignedProperty("Project Code", projectKey(project)),
+        assignedProperty("Owner", projectOwner(project)),
+        assignedProperty("Approvers", projectApprovers(project).join(", ")),
+        assignedProperty("Allow Custom Part Numbers", projectAllowsCustomPartNumbers(project) ? "Yes" : "No"),
+        assignedProperty("Description", projectDescription(project))
+      ].filter(Boolean);
   return `
-    <section class="propertySection">
-      <h3>Project</h3>
-      <dl class="propertyGrid">
-        ${property("Project Name", project)}
-        ${editing ? propertyProjectEditInline("Project Code", "key", projectKey(project)) : property("Project Code", projectKey(project))}
-        ${editing ? propertyProjectEditInline("Owner", "owner", projectOwner(project)) : property("Owner", projectOwner(project))}
-        ${editing ? propertyProjectEditInline("Approvers", "approvers", projectApprovers(project).join(", ")) : property("Approvers", projectApprovers(project).join(", ") || "Not set")}
-        ${editing ? propertyProjectEditInline("Google Drive Link", "drive_url", projectDriveUrl(project)) : propertyLink("Google Drive Link", projectDriveUrl(project))}
-        ${editing ? propertyProjectToggleInline("Allow Custom Part Numbers", "allow_custom_part_numbers", projectAllowsCustomPartNumbers(project)) : property("Allow Custom Part Numbers", projectAllowsCustomPartNumbers(project) ? "Yes" : "No")}
-        ${editing ? propertyProjectEditInline("Description", "description", projectDescription(project), { textarea: true }) : property("Description", projectDescription(project))}
-      </dl>
-      ${editing ? `
-        <div class="partEditActions">
-          <button class="iconButton primaryAction formAction" type="button" data-save-selected-project="${escapeHtml(project)}">Save Project</button>
-          <button class="iconButton formAction" type="button" data-cancel-project-edit>Cancel</button>
+    <div class="partCombinedLayout">
+      ${detailSection("", propertyRows)}
+      <section class="propertySection sectionLabeled">
+        <h3>Project Parts</h3>
+        <dl class="propertyGrid">
+          ${property("Part Count", partCount)}
+          ${property("Draft Revisions", draftCount)}
+          ${property("Released Revisions", releasedCount)}
+        </dl>
+      </section>
+    </div>
+  `;
+}
+
+function renderProjectInfoPanel(project) {
+  const partCount = parts.filter((part) => part.project === project).length;
+  const draftCount = parts.filter((part) => part.project === project && isDraftRevision(part)).length;
+  const releasedCount = parts.filter((part) => part.project === project && releaseStatusLabel(part) === "Released").length;
+  return `
+    <aside class="partAsidePanel" aria-label="Project details">
+      <header class="partAsideHeader">
+        <h3>Details</h3>
+        <button class="partAsideClose" type="button" data-part-panel-close aria-label="Close">×</button>
+      </header>
+      <div class="notionPropsPanel">
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Project code</span>
+          <span class="notionPropValue">${escapeHtml(projectKey(project))}</span>
         </div>
-      ` : ""}
-    </section>
-    <section class="propertySection">
-      <h3>Project Parts</h3>
-      <dl class="propertyGrid">
-        ${property("Part Count", parts.filter((part) => part.project === project).length)}
-        ${property("Draft Revisions", parts.filter((part) => part.project === project && isDraftRevision(part)).length)}
-        ${property("Released Revisions", parts.filter((part) => part.project === project && releaseStatusLabel(part) === "Released").length)}
-      </dl>
-    </section>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Owner</span>
+          <span class="notionPropValue">${escapeHtml(projectOwner(project) || "Not set")}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Parts</span>
+          <span class="notionPropValue">${partCount}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Draft revisions</span>
+          <span class="notionPropValue">${draftCount}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Released revisions</span>
+          <span class="notionPropValue">${releasedCount}</span>
+        </div>
+        <div class="notionPropRow">
+          <span class="notionPropLabel">Custom part numbers</span>
+          <span class="notionPropValue">${projectAllowsCustomPartNumbers(project) ? "Allowed" : "Not allowed"}</span>
+        </div>
+      </div>
+    </aside>
+  `;
+}
+
+function renderProjectOptionsMenu(project) {
+  const driveUrl = projectDriveUrl(project);
+  return `
+    <div class="partOptionsMenu" role="menu" aria-label="Project options">
+      <div class="partOptionsMenuBody">
+        ${partOptionItem("Open Google Drive", "open-project-drive", { icon: "attachments", disabled: !driveUrl })}
+        <div class="partOptionsDivider" role="separator"></div>
+        ${partOptionItem("Edit Project", "edit-project", { icon: "edit", active: activeProjectEditMode })}
+        ${partOptionItem("Refresh Remote", "refresh-remote", { icon: "refresh", title: "Pull the latest remote into the local repository" })}
+        ${activeProjectEditMode ? `
+          <div class="partOptionsDivider" role="separator"></div>
+          ${partOptionItem("Save Project", "save-project", { icon: "save" })}
+          ${partOptionItem("Cancel Changes", "cancel-project-edit", { icon: "cancel" })}
+        ` : ""}
+      </div>
+    </div>
   `;
 }
 
@@ -2681,17 +2727,6 @@ function propertyProjectToggleInline(label, field, checked) {
         <span>Allowed</span>
       </label>
     </dd>
-  `;
-}
-
-function projectActionRail(project) {
-  return `
-    <aside class="partActionRail" aria-label="Project actions">
-      ${partActionButton("Open Project Folder", "open-project-folder")}
-      ${partActionButton("Open Google Drive", "open-project-drive", { disabled: !projectDriveUrl(project) })}
-      ${partActionButton("Edit Project", "edit-project", { active: activeProjectEditMode })}
-      ${partActionButton("Pull Main", "pull-main")}
-    </aside>
   `;
 }
 
@@ -3048,10 +3083,6 @@ function allOnshapeDocuments() {
   return parts.flatMap((part) => part.onshape ?? []);
 }
 
-function metricRow(metric, value, detail, scope) {
-  return `<tr><td>${escapeHtml(metric)}</td><td>${escapeHtml(value)}</td><td>${escapeHtml(detail)}</td><td>${escapeHtml(scope)}</td><td>engineering@example.com</td><td>${new Date().toISOString().slice(0, 10)}</td></tr>`;
-}
-
 function renderSearchDetail() {
   const part = findPartByKey(selectedPartNumber);
   if (!part) {
@@ -3171,14 +3202,17 @@ function renderPartOptionsMenu(part) {
   const hasDraftRevision = draftRevisionsForPart(part.part_number).length > 0;
   const maturityTransition = nextMaturityTransition(part);
   const revisionTransition = nextRevisionTransition(part);
+  const deleteTransition = isDraftRevision(part) ? { to: "delete", mode: "direct", action: "delete" } : null;
   const maturityRule = maturityTransition ? maturityWorkflowRule(part, maturityTransition.to) : workflowRule([]);
   const revisionRule = revisionTransition ? revisionWorkflowRule(part, revisionTransition.to) : workflowRule([]);
+  const deleteRule = revisionWorkflowRule(part, "delete");
 
   return `
     <div class="partOptionsMenu" role="menu" aria-label="Part options">
       <div class="partOptionsMenuBody">
         ${partOptionItem("Copy Item ID", "copy-item-id", { icon: "copy-id" })}
         ${partOptionItem("Copy Item Contents", "copy-item-contents", { icon: "copy" })}
+        ${partOptionItem("Refresh Remote", "refresh-remote", { icon: "refresh", title: "Pull the latest remote into the local repository" })}
         <div class="partOptionsDivider" role="separator"></div>
         ${partOptionItem("Edit Item", "edit-part", { icon: "edit", disabled: !canEdit, active: activePartEditMode })}
         ${partOptionItem("Edit Attachments", "edit-attachments", { icon: "attachments", active: activeAttachmentEditMode })}
@@ -3190,9 +3224,10 @@ function renderPartOptionsMenu(part) {
         <div class="partOptionsDivider" role="separator"></div>
         ${workflowMenuAction(maturityTransition, maturityRule, "Transition Item Maturity", "maturity", part, { alwaysShow: true, icon: "status" })}
         ${workflowMenuAction(revisionTransition, revisionRule, "Transition Revision Status", "revision", part, { alwaysShow: true, icon: "arrow-up" })}
+        ${workflowMenuAction(deleteTransition, deleteRule, "Delete Revision", "revision", part, { alwaysShow: true, danger: true, icon: "trash", title: canEdit ? "Delete this draft revision" : "Only draft revisions can be deleted" })}
         ${workflowFeedbackMessage("maturity", part)}
         ${workflowFeedbackMessage("revision", part)}
-        ${activePartEditMode ? `
+        ${activePartEditMode || activeAlternateEditMode || activeAttachmentEditMode ? `
           <div class="partOptionsDivider" role="separator"></div>
           ${partOptionItem("Save Part", "save-part", { icon: "save" })}
           ${partOptionItem("Cancel Changes", "cancel-part-edit", { icon: "cancel" })}
@@ -3206,14 +3241,14 @@ function partOptionItem(label, action, { icon = "", disabled = false, active = f
   return `<button class="partOptionItem${active ? " is-active" : ""}" type="button" role="menuitem" data-part-action="${escapeHtml(action)}" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}"${disabled ? " disabled" : ""}${active ? " aria-current=\"true\"" : ""}${title ? ` title="${escapeHtml(title)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(label)}</span></button>`;
 }
 
-function workflowMenuAction(transition, rule, label, workflow, part, { danger = false, alwaysShow = false, icon = "" } = {}) {
+function workflowMenuAction(transition, rule, label, workflow, part, { danger = false, alwaysShow = false, icon = "", title = "" } = {}) {
   if (!transition && !alwaysShow) return "";
   const feedback = workflowFeedbackFor(workflow, part);
   const isRunning = feedback?.state === "running";
   const enabled = Boolean(transition) && Boolean(rule?.ready) && !isRunning;
   const to = transition?.to || "";
   const display = isRunning ? "Working..." : label;
-  return `<button class="partOptionItem${danger ? " danger" : ""}" type="button" role="menuitem" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(to)}"${enabled ? "" : " disabled"}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(display)}</span></button>`;
+  return `<button class="partOptionItem${danger ? " danger" : ""}" type="button" role="menuitem" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(to)}"${enabled ? "" : " disabled"}${title ? ` title="${escapeHtml(title)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(display)}</span></button>`;
 }
 
 function filterPartOptionsMenu(query = partOptionsSearchQuery) {
@@ -3294,22 +3329,40 @@ function renderCombinedPartDetails(part) {
   }
   const editing = activePartEditMode && isDraftRevision(part);
   const legacyPartNumber = legacyPartNumberValue(part);
-  const propertyRows = [
-    editing ? propertyEditInline("Description", "description", part.description || "", { textarea: true }) : property("Description", part.description || "Not set"),
-    editing ? propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }) : property("Revision Description", part.change_summary || "Not set"),
-    property("Project", part.project || "Unassigned"),
-    editing ? propertyEditSelectInline("Traceability", "traceability", traceabilityValue(part), traceabilityOptions()) : property("Traceability", traceabilityLabel(part)),
-    editing ? propertyEditInline("Legacy Number", "legacy_part_number", legacyPartNumber) : property("Legacy Number", legacyPartNumber || "Not set"),
-    editing ? propertyEditInline("Cost", "cost", optionalPartPropertyValue(part, "cost")) : property("Cost", optionalPartPropertyValue(part, "cost") || "Not set"),
-    editing ? propertyEditInline("Mass", "mass", optionalPartPropertyValue(part, "mass")) : property("Mass", optionalPartPropertyValue(part, "mass") || "Not set"),
-    propertyHtml("Based On", basedOnLink(part)),
-    ...(editing ? [
-      propertyEditInline("Google Drive Link", "driveUrl", documentUrl(part, "drive")),
-      propertyEditInline("Onshape Link", "onshapeUrl", documentUrl(part, "onshape")),
-      propertyEditInline("Work Instructions Link", "workUrl", documentUrl(part, "work")),
-      propertyEditInline("Approvers", "approvers", (part.approvers ?? []).map((approver) => approver.name || approver).join(", "))
-    ] : [])
-  ].filter(Boolean);
+  const driveUrl = documentUrl(part, "drive");
+  const onshapeUrl = documentUrl(part, "onshape");
+  const workUrl = documentUrl(part, "work");
+  const basedOnValue = part.based_on || part.based_on_part_number || part.copied_from || "";
+  const approversValue = (part.approvers ?? []).map((approver) => approver.name || approver).filter(Boolean).join(", ");
+  const costValue = optionalPartPropertyValue(part, "cost");
+  const massValue = optionalPartPropertyValue(part, "mass");
+  const traceability = traceabilityValue(part);
+  const propertyRows = editing
+    ? [
+        propertyEditInline("Description", "description", part.description || "", { textarea: true }),
+        propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }),
+        property("Project", part.project || "Unassigned"),
+        propertyEditSelectInline("Traceability", "traceability", traceability, traceabilityOptions()),
+        propertyEditInline("Legacy Number", "legacy_part_number", legacyPartNumber),
+        propertyEditInline("Cost", "cost", costValue),
+        propertyEditInline("Mass", "mass", massValue),
+        propertyHtml("Based On", basedOnLink(part)),
+        propertyEditInline("Google Drive Link", "driveUrl", driveUrl),
+        propertyEditInline("Onshape Link", "onshapeUrl", onshapeUrl),
+        propertyEditInline("Work Instructions Link", "workUrl", workUrl),
+        propertyEditInline("Approvers", "approvers", approversValue)
+      ]
+    : [
+        assignedProperty("Description", part.description),
+        assignedProperty("Revision Description", part.change_summary),
+        assignedProperty("Project", part.project),
+        assignedProperty("Traceability", traceability),
+        assignedProperty("Legacy Number", legacyPartNumber),
+        assignedProperty("Cost", costValue),
+        assignedProperty("Mass", massValue),
+        assignedPropertyHtml("Based On", basedOnLink(part), basedOnValue),
+        assignedProperty("Approvers", approversValue)
+      ].filter(Boolean);
 
   return `
     <div class="partCombinedLayout">
@@ -3323,7 +3376,7 @@ function renderCombinedPartDetails(part) {
         return `
           <section class="propertySection sectionLabeled">
             <h3>Activity</h3>
-            ${activityItems.length ? renderActivityHistory(activityItems) : `<p class="empty">No activity recorded for this part.</p>`}
+            ${activityItems.length ? renderActivityHistory(activityItems, part) : `<p class="empty">No activity recorded for this part.</p>`}
           </section>
         `;
       })()}
@@ -3403,45 +3456,120 @@ function renderPropertyBody(part) {
   return renderOverviewTab(part);
 }
 
-function renderEditableAttachmentsTab(part) {
-  return `
-    <div class="attachmentToolbar">
-      <button class="iconButton primaryAction attachmentAddButton" type="button" data-add-attachment-field title="Add attachment" aria-label="Add attachment">+</button>
-    </div>
-    <div class="relationStack">
-      ${renderAttachmentSections(part, { editable: true })}
-      <section class="propertySection attachmentEditSection">
-        <h3>New Attachments</h3>
-        <div class="attachmentEditRows" data-attachment-edit-rows>
-          ${Array.from({ length: activeAttachmentDraftCount }, (_, index) => attachmentEditRow(index)).join("")}
-        </div>
-      </section>
-      <div class="partEditActions">
-        <button class="iconButton primaryAction formAction" type="button" data-save-attachments="${escapeHtml(partKey(part))}">Save Attachments</button>
-        <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
-      </div>
-    </div>
-  `;
+function isBlankAttachmentDraftRow(row) {
+  return Boolean(row && String(row.id || "").startsWith("blank:") && !row.title && !row.url);
 }
 
-function attachmentEditRow(index = 0) {
+function createBlankAttachmentDraftRow() {
+  return {
+    id: `blank:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    title: "",
+    url: "",
+    type: "DRAWING"
+  };
+}
+
+function beginAttachmentEdit(part) {
+  const usedIds = new Set();
+  attachmentEditDraft = attachmentsForPart(part).map((record) => {
+    let id = attachmentRecordKey(record) || `row:${Date.now().toString(36)}`;
+    while (usedIds.has(id)) {
+      id = `${id}:${Math.random().toString(36).slice(2, 6)}`;
+    }
+    usedIds.add(id);
+    return {
+      id,
+      title: String(record.title || record.name || ""),
+      url: String(record.url || ""),
+      type: attachmentTypeLabel(record)
+    };
+  });
+}
+
+function clearAttachmentEditDraft() {
+  attachmentEditDraft = null;
+}
+
+function insertBlankAttachmentRow({ afterId = "" } = {}) {
+  if (!requireProfileForEdit()) return;
+  if (!activeAttachmentEditMode) return;
+  if (!Array.isArray(attachmentEditDraft)) {
+    const part = getOpenedPart() || getSelectedBomPart();
+    beginAttachmentEdit(part);
+  }
+  const blank = createBlankAttachmentDraftRow();
+  if (afterId) {
+    const index = attachmentEditDraft.findIndex((row) => row.id === afterId);
+    if (index >= 0) attachmentEditDraft.splice(index + 1, 0, blank);
+    else attachmentEditDraft.push(blank);
+  } else {
+    attachmentEditDraft.push(blank);
+  }
+  statusMessage = "Enter title and link for the new attachment";
+  renderApp();
+}
+
+function removeAttachmentDraftRow(rowId) {
+  if (!Array.isArray(attachmentEditDraft)) return;
+  attachmentEditDraft = attachmentEditDraft.filter((row) => row.id !== rowId);
+  renderApp();
+}
+
+function updateAttachmentDraftField(rowId, field, value) {
+  if (!Array.isArray(attachmentEditDraft)) return;
+  const row = attachmentEditDraft.find((entry) => entry.id === rowId);
+  if (!row || !["title", "url", "type"].includes(field)) return;
+  row[field] = value;
+}
+
+function renderEditableAttachmentsTab(part) {
+  if (!Array.isArray(attachmentEditDraft)) {
+    beginAttachmentEdit(part);
+  }
+  const rows = attachmentEditDraft;
+  const typeOptions = attachmentTypeOptions();
   return `
-    <div class="attachmentEditRow" data-attachment-row>
-      <label class="propertyEditField">
-        <span>Title</span>
-        <input class="tableInput" data-attachment-field="title" placeholder="Attachment title">
-      </label>
-      <label class="propertyEditField">
-        <span>Link</span>
-        <input class="tableInput" data-attachment-field="url" placeholder="https://">
-      </label>
-      <label class="propertyEditField">
-        <span>Type</span>
-        <select class="tableInput" data-attachment-field="type">
-          ${attachmentTypeOptions().map((type) => `<option value="${escapeHtml(type)}"${index === 0 && type === "DRAWING" ? " selected" : ""}>${escapeHtml(type)}</option>`).join("")}
-        </select>
-      </label>
-      <button class="iconButton attachmentRemoveButton attachmentRemoveRowButton" type="button" data-remove-new-attachment title="Remove row" aria-label="Remove row"></button>
+    <div class="alternateEditLayout attachmentEditLayout">
+      <header class="alternateEditHeader">
+        <div>
+          <h3>Edit Attachments</h3>
+          <p>Manage linked documents for ${escapeHtml(partObjectLabel(part))}.</p>
+        </div>
+      </header>
+      <div class="detailTableWrap" data-attachment-edit-table>
+        <table class="detailTable alternateEditTable attachmentEditTable">
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Link</th>
+              <th scope="col">Type</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => {
+              const blank = isBlankAttachmentDraftRow(row);
+              return `
+                <tr class="alternateEditRow attachmentEditRow${blank ? " is-blank" : ""}" data-attachment-row="${escapeHtml(row.id)}">
+                  <td>
+                    <input class="tableInput" data-attachment-field="title" value="${escapeHtml(row.title || "")}" placeholder="Attachment title" aria-label="Attachment title">
+                  </td>
+                  <td>
+                    <input class="tableInput" data-attachment-field="url" value="${escapeHtml(row.url || "")}" placeholder="https://" aria-label="Attachment link">
+                  </td>
+                  <td>
+                    <select class="tableInput" data-attachment-field="type" aria-label="Attachment type">
+                      ${typeOptions.map((type) => `<option value="${escapeHtml(type)}"${row.type === type ? " selected" : ""}>${escapeHtml(type)}</option>`).join("")}
+                    </select>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+        <button class="treeNode bomNode bomNewRow alternateNewRow" type="button" data-attachment-add-blank title="Add attachment" aria-label="Add attachment row">
+          <span class="bomNewRowIcon" aria-hidden="true"></span>
+        </button>
+      </div>
     </div>
   `;
 }
@@ -3544,30 +3672,33 @@ function renderHistoryTab(part) {
     ${renderRevisionHistory(part)}
     <section class="propertySection">
       <h3>Activity</h3>
-      ${activityItems.length ? renderActivityHistory(activityItems) : `<p class="empty">No activity recorded for this part.</p>`}
+      ${activityItems.length ? renderActivityHistory(activityItems, part) : `<p class="empty">No activity recorded for this part.</p>`}
     </section>
   `;
 }
 
-function renderActivityHistory(items) {
+function renderActivityHistory(items, part = null) {
   const sorted = [...items].sort((a, b) => String(b.performed_at || "").localeCompare(String(a.performed_at || "")));
   return `
     <ol class="activityCommitList">
-      ${sorted.map((item) => `
+      ${sorted.map((item) => {
+        const revision = String(item.revision || part?.revision || "").trim() || "—";
+        return `
         <li class="activityCommitItem">
           <div class="activityCommitRail" aria-hidden="true">
             <span class="activityCommitDot"></span>
           </div>
           <div class="activityCommitBody">
-            <p class="activityCommitMessage">${escapeHtml(item.detail || activityDefaultDetail(item))}</p>
+            <p class="activityCommitMessage">${escapeHtml(activityActionLabel(item.action))}</p>
             <p class="activityCommitMeta">
+              <span class="activityCommitRevision">Rev ${escapeHtml(revision)}</span>
               <span class="activityCommitActor">${escapeHtml(item.actor || "Unknown user")}</span>
-              <span class="activityCommitAction">${escapeHtml(activityActionLabel(item.action))}</span>
               <time class="activityCommitTime" datetime="${escapeHtml(item.performed_at || "")}">${escapeHtml(formatActivityTimestamp(item.performed_at))}</time>
             </p>
           </div>
         </li>
-      `).join("")}
+      `;
+      }).join("")}
     </ol>
   `;
 }
@@ -3804,6 +3935,23 @@ function property(label, value) {
   `;
 }
 
+function hasAssignedPropertyValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return false;
+  const normalized = raw.toLowerCase();
+  return normalized !== "not set" && normalized !== "unassigned";
+}
+
+function assignedProperty(label, value) {
+  if (!hasAssignedPropertyValue(value)) return "";
+  return property(label, value);
+}
+
+function assignedPropertyHtml(label, html, rawValue = html) {
+  if (!hasAssignedPropertyValue(rawValue)) return "";
+  return propertyHtml(label, html);
+}
+
 function propertyLink(label, url, { kind = "", required = false } = {}) {
   if (!url) {
     return `
@@ -3995,6 +4143,7 @@ function legacyActivityHistory(part) {
       action: "create",
       actor: createdBy(part),
       performed_at: part.created_at,
+      revision: part.revision || "",
       detail: `Created ${partObjectLabel(part)}`
     }));
   }
@@ -4004,6 +4153,7 @@ function legacyActivityHistory(part) {
       action: "updated_properties",
       actor: updatedBy(part),
       performed_at: part.updated_at,
+      revision: part.revision || "",
       detail: part.change_summary || `Updated ${partObjectLabel(part)}`
     }));
   }
@@ -4019,6 +4169,7 @@ function normalizeActivityEntry(entry) {
     action: normalizeActivityAction(entry.action),
     actor: entry.actor || entry.user || entry.updated_by || "Unknown user",
     performed_at: entry.performed_at || entry.timestamp || entry.date || "",
+    revision: String(entry.revision || entry.rev || "").trim(),
     detail: entry.detail || entry.summary || ""
   };
 }
@@ -4094,6 +4245,7 @@ function appendPartActivity(part, action, detail, options = {}) {
     action,
     actor: options.actor || currentEditorName(),
     performed_at: options.performedAt || activityTimestamp(),
+    revision: options.revision || part.revision || "",
     detail
   });
   const explicit = asArray(part.activity_history || part.revision_properties?.activity_history)
@@ -4564,8 +4716,122 @@ function approvedAlternateRow(alternate) {
   `;
 }
 
+function isBlankAlternateDraftRow(row) {
+  return Boolean(row && String(row.id || "").startsWith("blank:") && !row.partNumber);
+}
+
+function createBlankAlternateDraftRow() {
+  return {
+    id: `blank:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    partNumber: ""
+  };
+}
+
+function beginAlternateEdit(part) {
+  alternateEditDraft = alternatesForPart(part).map((partNumber) => ({
+    id: partNumber,
+    partNumber
+  }));
+}
+
+function clearAlternateEditDraft() {
+  alternateEditDraft = null;
+}
+
+function insertBlankAlternateRow({ afterId = "" } = {}) {
+  if (!requireProfileForEdit()) return;
+  if (!activeAlternateEditMode) return;
+  if (!Array.isArray(alternateEditDraft)) {
+    const part = getOpenedPart() || getSelectedBomPart();
+    beginAlternateEdit(part);
+  }
+  const blank = createBlankAlternateDraftRow();
+  if (afterId) {
+    const index = alternateEditDraft.findIndex((row) => row.id === afterId);
+    if (index >= 0) alternateEditDraft.splice(index + 1, 0, blank);
+    else alternateEditDraft.push(blank);
+  } else {
+    alternateEditDraft.push(blank);
+  }
+  statusMessage = "Select an item for the new alternate row";
+  renderApp();
+}
+
+function assignAlternateDraftRow(rowId, partNumber) {
+  if (!requireProfileForEdit()) return;
+  const source = getOpenedPart() || getSelectedBomPart();
+  const target = latestRevisionForPart(partNumber) || findPartByKey(partNumber);
+  if (!source || !target || !Array.isArray(alternateEditDraft)) {
+    statusMessage = "Select a valid part";
+    renderApp();
+    return;
+  }
+  const canonical = canonicalPartNumber(target.part_number);
+  const sourceNumber = canonicalPartNumber(source.part_number);
+  if (!canonical || canonical === sourceNumber) {
+    statusMessage = "A part cannot be an alternate of itself";
+    renderApp();
+    return;
+  }
+  const duplicate = alternateEditDraft.some((row) => row.id !== rowId && canonicalPartNumber(row.partNumber) === canonical);
+  if (duplicate) {
+    statusMessage = `${partObjectLabel(target)} is already in the alternates list`;
+    renderApp();
+    return;
+  }
+  const row = alternateEditDraft.find((entry) => entry.id === rowId);
+  if (!row) {
+    statusMessage = "Could not update alternate row";
+    renderApp();
+    return;
+  }
+  row.partNumber = canonical;
+  row.id = canonical;
+  statusMessage = `Selected ${partObjectLabel(target)} as an alternate`;
+  renderApp();
+}
+
+function removeAlternateDraftRow(rowId) {
+  if (!Array.isArray(alternateEditDraft)) return;
+  alternateEditDraft = alternateEditDraft.filter((row) => row.id !== rowId);
+  renderApp();
+}
+
+async function saveAlternateEditFromDraft() {
+  if (!requireProfileForEdit()) return;
+  const part = getOpenedPart() || getSelectedBomPart();
+  if (!part || !Array.isArray(alternateEditDraft)) return;
+  const previous = new Set(alternatesForPart(part));
+  const next = new Set(
+    alternateEditDraft
+      .map((row) => canonicalPartNumber(row.partNumber))
+      .filter(Boolean)
+  );
+  previous.forEach((partNumber) => {
+    if (next.has(partNumber)) return;
+    const other = latestRevisionForPart(partNumber) || findPartByKey(partNumber);
+    if (other) unlinkPartsAsAlternates(part, other);
+  });
+  next.forEach((partNumber) => {
+    if (previous.has(partNumber)) return;
+    const other = latestRevisionForPart(partNumber) || findPartByKey(partNumber);
+    if (other) linkPartsAsAlternates(part, other);
+  });
+  clearAlternateEditDraft();
+  activeAlternateEditMode = false;
+  partOptionsMenuOpen = false;
+  partOptionsSearchQuery = "";
+  statusMessage = `Saved alternates for ${partObjectLabel(part)}; pushing to ${productDataRemoteLabel()}.`;
+  renderApp();
+  await persistLocalChanges();
+  await pushDraftPartChangesToRunner(part, { commitMessage: `Update alternates ${partObjectLabel(part)}` });
+}
+
 function renderEditableAlternates(part) {
-  const rows = alternatePartsFor(part);
+  if (!Array.isArray(alternateEditDraft)) {
+    beginAlternateEdit(part);
+  }
+  const rows = alternateEditDraft;
   return `
     <div class="alternateEditLayout">
       <header class="alternateEditHeader">
@@ -4573,38 +4839,44 @@ function renderEditableAlternates(part) {
           <h3>Edit Alternates</h3>
           <p>Manage approved substitutes for ${escapeHtml(partObjectLabel(part))}.</p>
         </div>
-        <div class="alternateEditActions">
-          <button class="iconButton formAction" type="button" data-add-alternate-picker title="Add alternate">Add Alternate</button>
-          <button class="iconButton formAction" type="button" data-cancel-alternate-edit>Done</button>
-        </div>
       </header>
-      <div class="detailTableWrap">
-        <table class="detailTable revisionHistoryTable">
+      <div class="detailTableWrap" data-alternate-edit-table>
+        <table class="detailTable revisionHistoryTable alternateEditTable">
           <thead>
             <tr>
-              <th scope="col">Object</th>
+              <th scope="col">Item</th>
               <th scope="col">Name</th>
               <th scope="col">Status</th>
               <th scope="col">Project</th>
-              <th scope="col"></th>
             </tr>
           </thead>
           <tbody>
-            ${rows.length
-              ? rows.map((alternate) => `
-                <tr>
-                  <td><button class="linkButton" type="button" data-part-number="${escapeHtml(partKey(alternate))}">${escapeHtml(partObjectLabel(alternate))}</button></td>
-                  <td>${escapeHtml(alternate.name || "Untitled")}</td>
-                  <td>${escapeHtml(releaseStatusLabel(alternate))}</td>
-                  <td>${escapeHtml(alternate.project || "Unassigned")}</td>
-                  <td class="alternateEditRemoveCell">
-                    <button class="iconButton formAction" type="button" data-remove-alternate="${escapeHtml(alternate.part_number)}" title="Remove alternate">Remove</button>
+            ${rows.map((row) => {
+              const blank = isBlankAlternateDraftRow(row) || !row.partNumber;
+              const alternate = blank
+                ? null
+                : latestRevisionForPart(row.partNumber) || findPartByKey(row.partNumber);
+              const objectLabel = blank
+                ? "Select item"
+                : (alternate ? partObjectLabel(alternate) : row.partNumber);
+              return `
+                <tr class="alternateEditRow${blank ? " is-blank" : ""}" data-alternate-row="${escapeHtml(row.id)}">
+                  <td>
+                    <button class="bomItemSelectBtn alternateItemSelectBtn${blank ? " is-placeholder" : ""}" type="button" data-filter-picker="alternateItem" data-alternate-pick-item="${escapeHtml(row.id)}" aria-haspopup="listbox" aria-expanded="false" title="Select item">
+                      ${escapeHtml(objectLabel)}
+                    </button>
                   </td>
+                  <td>${escapeHtml(alternate?.name || (blank ? "—" : "Untitled"))}</td>
+                  <td>${escapeHtml(alternate ? releaseStatusLabel(alternate) : "—")}</td>
+                  <td>${escapeHtml(alternate?.project || (blank ? "—" : "Unassigned"))}</td>
                 </tr>
-              `).join("")
-              : `<tr><td class="emptyCell" colspan="5">No alternates assigned yet</td></tr>`}
+              `;
+            }).join("")}
           </tbody>
         </table>
+        <button class="treeNode bomNode bomNewRow alternateNewRow" type="button" data-alternate-add-blank title="Add alternate" aria-label="Add alternate row">
+          <span class="bomNewRowIcon" aria-hidden="true"></span>
+        </button>
       </div>
     </div>
   `;
@@ -4909,20 +5181,6 @@ function bomItemsForPersist(bom) {
   return asArray(bom).filter((item) => !isBlankBomItem(item));
 }
 
-function countBy(records, key) {
-  return records.reduce((counts, record) => {
-    const value = record[key] || "Not set";
-    counts[value] = (counts[value] ?? 0) + 1;
-    return counts;
-  }, {});
-}
-
-function formatCounts(counts, labeler = (value) => value) {
-  return Object.entries(counts)
-    .map(([value, count]) => `${labeler(value)}: ${count}`)
-    .join(" | ");
-}
-
 function renderNavigationTree() {
   const states = ["draft", "release_candidate", "released", "obsolete"];
   const projectNames = projects();
@@ -4950,21 +5208,8 @@ function renderNavigationTree() {
     return;
   }
 
-  if (activeNavMode === "table" || activeNavMode === "history") {
+  if (activeNavMode === "table") {
     navigationTree.innerHTML = "";
-    return;
-  }
-
-  if (activeNavMode === "report") {
-    navigationTree.innerHTML = `
-      <div class="treeGroup">
-        <p>Reports</p>
-        <button class="treeNode root" type="button" data-clear-filters="true">Registry summary</button>
-        <button class="treeNode" type="button" data-filter-state="draft">Draft parts</button>
-        <button class="treeNode" type="button" data-filter-state="release_candidate">Release candidates</button>
-        <button class="treeNode" type="button" data-filter-state="released">Released parts</button>
-      </div>
-    `;
     return;
   }
 
@@ -5185,6 +5430,9 @@ function applyNavMode(mode) {
     selectedBomPartNumber = null;
     activePartEditMode = false;
     activeAttachmentEditMode = false;
+    activeAlternateEditMode = false;
+    clearAlternateEditDraft();
+    clearAttachmentEditDraft();
     activeProjectEditMode = false;
     const url = new URL(window.location.href);
     url.searchParams.delete("part");
@@ -5223,7 +5471,8 @@ function moveToPart(partNumber, { editMode = false, newTab = false } = {}) {
   activePartEditMode = Boolean(editMode) && isDraftRevision(part);
   activeAttachmentEditMode = false;
   activeAlternateEditMode = false;
-  activeAttachmentDraftCount = 0;
+  clearAlternateEditDraft();
+  clearAttachmentEditDraft();
   partAsidePanel = null;
   partOptionsMenuOpen = false;
   activeNavMode = "part";
@@ -5233,7 +5482,11 @@ function moveToPart(partNumber, { editMode = false, newTab = false } = {}) {
     searchSuggestions.classList.remove("visible");
   }
   window.history.replaceState({}, "", partUrl(objectId, { editMode: activePartEditMode }));
-  openWorkspaceTab("part", { objectId, editMode: activePartEditMode }, { activate: true, forceNew: newTab });
+  openWorkspaceTab("part", { objectId, editMode: activePartEditMode }, {
+    activate: true,
+    forceNew: newTab,
+    replaceActive: !newTab
+  });
   closeSearchModal();
 }
 
@@ -5256,9 +5509,8 @@ function syncChrome() {
   const isEmpty = !workspaceTabs.length || !activeTabId;
   const isOpened = !isEmpty && activeNavMode === "part";
   const isSinglePane = !isEmpty && ["settings"].includes(activeNavMode);
-  const isReportPane = !isEmpty && activeNavMode === "report";
   const isProjectPane = !isEmpty && activeNavMode === "projects";
-  const isTablePane = !isEmpty && (activeNavMode === "table" || activeNavMode === "history");
+  const isTablePane = !isEmpty && activeNavMode === "table";
   const isHomePane = !isEmpty && activeNavMode === "home";
   document.body.classList.toggle("openedPartMode", isOpened);
   document.body.classList.toggle("partCanvasMode", isOpened);
@@ -5323,7 +5575,6 @@ function syncChrome() {
   workspace.classList.toggle("partReadOnlyWorkspace", isOpened && !activePartEditMode);
   workspace.classList.toggle("partEditingWorkspace", isOpened && activePartEditMode);
   workspace.classList.toggle("singlePaneWorkspace", isSinglePane);
-  workspace.classList.toggle("reportWorkspace", isReportPane);
   workspace.classList.toggle("projectWorkspace", isProjectPane);
   workspace.classList.toggle("tabularWorkspace", isTablePane);
 
@@ -5339,20 +5590,30 @@ function hidePartContextMenu() {
   partContextMenu.dataset.partNumber = "";
   partContextMenu.dataset.bomPartNumber = "";
   partContextMenu.dataset.bomParentNumber = "";
+  partContextMenu.dataset.alternateRowId = "";
+  partContextMenu.dataset.attachmentRowId = "";
   partContextMenu.dataset.menuMode = "";
 }
 
 function showPartContextMenu(event, partNumber) {
   event.preventDefault();
+  const part = findPartByKey(partNumber);
+  const driveUrl = part ? documentUrl(part, "drive") : "";
+  const onshapeUrl = part ? documentUrl(part, "onshape") : "";
+  const workUrl = part ? documentUrl(part, "work") : "";
   selectedPartNumber = partNumber;
   partContextMenu.dataset.menuMode = "part";
   partContextMenu.dataset.partNumber = partNumber;
   partContextMenu.dataset.bomPartNumber = "";
+  partContextMenu.dataset.bomParentNumber = "";
+  partContextMenu.dataset.alternateRowId = "";
+  partContextMenu.dataset.attachmentRowId = "";
   partContextMenu.innerHTML = `
     <button type="button" role="menuitem" data-context-action="open">Open</button>
     <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
-    <button type="button" role="menuitem" data-context-action="edit">Edit</button>
-    <button type="button" role="menuitem" data-context-action="favorite">${favoritePartKeys.includes(partNumber) ? "Unfavorite" : "Favorite"}</button>
+    <button type="button" role="menuitem" data-context-action="open-drive"${driveUrl ? "" : " disabled"}>Open Drive</button>
+    <button type="button" role="menuitem" data-context-action="open-onshape"${onshapeUrl ? "" : " disabled"}>Open Onshape</button>
+    <button type="button" role="menuitem" data-context-action="open-work"${workUrl ? "" : " disabled"}>Open WI</button>
   `;
   positionContextMenu(event);
 }
@@ -5360,15 +5621,68 @@ function showPartContextMenu(event, partNumber) {
 function showBomContextMenu(event, childIdentifier) {
   event.preventDefault();
   const rootPart = getOpenedPart();
+  const targetId = childIdentifier || (rootPart ? partKey(rootPart) : "");
+  const part = targetId ? findPartByKey(targetId) : null;
+  const driveUrl = part ? documentUrl(part, "drive") : "";
+  const onshapeUrl = part ? documentUrl(part, "onshape") : "";
+  const workUrl = part ? documentUrl(part, "work") : "";
   const owner = childIdentifier ? findBomItemOwner(childIdentifier) : null;
   const isDirectRootChild = Boolean(owner && rootPart && owner.parent === rootPart);
-  partContextMenu.dataset.menuMode = "bom";
-  partContextMenu.dataset.partNumber = "";
+  const showEditActions = Boolean(activePartEditMode);
+  partContextMenu.dataset.menuMode = showEditActions ? "bom" : "part";
+  partContextMenu.dataset.partNumber = targetId || "";
   partContextMenu.dataset.bomPartNumber = childIdentifier || "";
   partContextMenu.dataset.bomParentNumber = "";
-  partContextMenu.innerHTML = `
+  partContextMenu.dataset.alternateRowId = "";
+  partContextMenu.dataset.attachmentRowId = "";
+  const navigateItems = targetId ? `
+    <button type="button" role="menuitem" data-context-action="open">Open</button>
+    <button type="button" role="menuitem" data-context-action="open-new-tab">Open in New Tab</button>
+    <button type="button" role="menuitem" data-context-action="open-drive"${driveUrl ? "" : " disabled"}>Open Drive</button>
+    <button type="button" role="menuitem" data-context-action="open-onshape"${onshapeUrl ? "" : " disabled"}>Open Onshape</button>
+    <button type="button" role="menuitem" data-context-action="open-work"${workUrl ? "" : " disabled"}>Open WI</button>
+  ` : "";
+  const editItems = showEditActions ? `
+    ${navigateItems ? '<div class="contextMenuDivider" role="separator"></div>' : ""}
     <button type="button" role="menuitem" data-context-action="bom-add">Add Component</button>
     ${isDirectRootChild ? '<button type="button" role="menuitem" data-context-action="bom-delete">Delete Component</button>' : ""}
+  ` : "";
+  partContextMenu.innerHTML = `${navigateItems}${editItems}`;
+  if (!partContextMenu.innerHTML.trim()) {
+    hidePartContextMenu();
+    return;
+  }
+  positionContextMenu(event);
+}
+
+function showAlternateContextMenu(event, rowId = "") {
+  event.preventDefault();
+  if (!activeAlternateEditMode) return;
+  partContextMenu.dataset.menuMode = "alternate";
+  partContextMenu.dataset.partNumber = "";
+  partContextMenu.dataset.bomPartNumber = "";
+  partContextMenu.dataset.bomParentNumber = "";
+  partContextMenu.dataset.alternateRowId = rowId || "";
+  partContextMenu.dataset.attachmentRowId = "";
+  partContextMenu.innerHTML = `
+    <button type="button" role="menuitem" data-context-action="alternate-add">Add</button>
+    ${rowId ? '<button type="button" role="menuitem" data-context-action="alternate-delete">Delete</button>' : ""}
+  `;
+  positionContextMenu(event);
+}
+
+function showAttachmentContextMenu(event, rowId = "") {
+  event.preventDefault();
+  if (!activeAttachmentEditMode) return;
+  partContextMenu.dataset.menuMode = "attachment";
+  partContextMenu.dataset.partNumber = "";
+  partContextMenu.dataset.bomPartNumber = "";
+  partContextMenu.dataset.bomParentNumber = "";
+  partContextMenu.dataset.alternateRowId = "";
+  partContextMenu.dataset.attachmentRowId = rowId || "";
+  partContextMenu.innerHTML = `
+    <button type="button" role="menuitem" data-context-action="attachment-add">Add</button>
+    ${rowId ? '<button type="button" role="menuitem" data-context-action="attachment-delete">Delete</button>' : ""}
   `;
   positionContextMenu(event);
 }
@@ -5411,24 +5725,48 @@ partsList.addEventListener("contextmenu", (event) => {
 });
 
 navigationTree.addEventListener("contextmenu", (event) => {
-  if (!activePartEditMode || activeNavMode !== "part" || event.target.closest("input, select")) {
+  if (activeNavMode !== "part" || event.target.closest("input, select, textarea")) {
     return;
   }
   if (!event.target.closest(".bomGrid")) {
     return;
   }
   const bomNode = event.target.closest("[data-bom-part-number]");
-  const childIdentifier = bomNode?.classList.contains("root") ? "" : bomNode?.dataset.bomPartNumber || "";
-  if (childIdentifier) {
+  if (!bomNode) {
+    return;
+  }
+  const childIdentifier = bomNode.classList.contains("root") ? "" : bomNode.dataset.bomPartNumber || "";
+  if (childIdentifier && String(childIdentifier).startsWith("blank:")) {
+    if (activePartEditMode) {
+      showBomContextMenu(event, childIdentifier);
+    }
+    return;
+  }
+  if (childIdentifier && activePartEditMode) {
     const owner = findBomItemOwner(childIdentifier);
     if (!owner || owner.parent !== getOpenedPart()) {
-      event.preventDefault();
-      statusMessage = "Open the subassembly to edit its BOM";
-      renderApp();
+      // Still allow open/navigate for nested parts; only block edit-specific delete messaging
+      showPartContextMenu(event, childIdentifier);
       return;
     }
   }
   showBomContextMenu(event, childIdentifier);
+});
+
+partDetail.addEventListener("contextmenu", (event) => {
+  if (activeNavMode !== "part") return;
+
+  if (activeAlternateEditMode && event.target.closest("[data-alternate-edit-table], .alternateEditLayout")) {
+    if (event.target.closest("input, select, textarea")) return;
+    const row = event.target.closest("[data-alternate-row]");
+    showAlternateContextMenu(event, row?.dataset.alternateRow || "");
+    return;
+  }
+
+  if (activeAttachmentEditMode && event.target.closest("[data-attachment-edit-table], .attachmentEditLayout")) {
+    const row = event.target.closest("[data-attachment-row]");
+    showAttachmentContextMenu(event, row?.dataset.attachmentRow || "");
+  }
 });
 
 partsList.addEventListener("input", (event) => {
@@ -5486,6 +5824,9 @@ partsList.addEventListener("keydown", (event) => {
     event.preventDefault();
     selectedProjectName = projectRow.dataset.projectName;
     activeProjectEditMode = false;
+    partAsidePanel = null;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
     renderApp();
     return;
   }
@@ -5507,9 +5848,28 @@ partsList.addEventListener("keydown", (event) => {
 
 partDetail.addEventListener("input", (event) => {
   const search = event.target.closest("[data-part-options-search]");
-  if (!search) return;
-  partOptionsSearchQuery = search.value;
-  filterPartOptionsMenu(partOptionsSearchQuery);
+  if (search) {
+    partOptionsSearchQuery = search.value;
+    filterPartOptionsMenu(partOptionsSearchQuery);
+    return;
+  }
+  const attachmentField = event.target.closest("[data-attachment-field]");
+  if (attachmentField && activeAttachmentEditMode) {
+    const row = attachmentField.closest("[data-attachment-row]");
+    if (row?.dataset.attachmentRow) {
+      updateAttachmentDraftField(row.dataset.attachmentRow, attachmentField.dataset.attachmentField, attachmentField.value);
+    }
+  }
+});
+
+partDetail.addEventListener("change", (event) => {
+  const attachmentField = event.target.closest("[data-attachment-field]");
+  if (attachmentField && activeAttachmentEditMode) {
+    const row = attachmentField.closest("[data-attachment-row]");
+    if (row?.dataset.attachmentRow) {
+      updateAttachmentDraftField(row.dataset.attachmentRow, attachmentField.dataset.attachmentField, attachmentField.value);
+    }
+  }
 });
 
 partDetail.addEventListener("keydown", (event) => {
@@ -5545,7 +5905,8 @@ partDetail.addEventListener("click", (event) => {
 
   const removeNewAttachment = event.target.closest("[data-remove-new-attachment]");
   if (removeNewAttachment) {
-    removeNewAttachment.closest("[data-attachment-row]")?.remove();
+    const row = removeNewAttachment.closest("[data-attachment-row]");
+    if (row?.dataset.attachmentRow) removeAttachmentDraftRow(row.dataset.attachmentRow);
     return;
   }
 
@@ -5558,11 +5919,10 @@ partDetail.addEventListener("click", (event) => {
     return;
   }
 
-  const addAttachmentField = event.target.closest("[data-add-attachment-field]");
-  if (addAttachmentField) {
-    activeAttachmentDraftCount += 1;
-    const rows = document.querySelector("[data-attachment-edit-rows]");
-    rows?.insertAdjacentHTML("beforeend", attachmentEditRow(activeAttachmentDraftCount - 1));
+  const addAttachmentBlank = event.target.closest("[data-attachment-add-blank], [data-add-attachment-field]");
+  if (addAttachmentBlank) {
+    event.preventDefault();
+    insertBlankAttachmentRow();
     return;
   }
 
@@ -5574,10 +5934,6 @@ partDetail.addEventListener("click", (event) => {
     }
     if (activeNavMode === "table") {
       handleTabularAction(partAction.dataset.partAction);
-      return;
-    }
-    if (activeNavMode === "history") {
-      handleHistoryAction(partAction.dataset.partAction);
       return;
     }
     const shouldCloseOptions = partOptionsMenuOpen;
@@ -5599,7 +5955,7 @@ partDetail.addEventListener("click", (event) => {
   if (partPanelBtn) {
     const next = partPanelBtn.dataset.partPanel;
     partOptionsMenuOpen = false;
-    const layout = partDetail.querySelector(".partDetailLayout.partDetailV2");
+    const layout = partDetail.querySelector(".partDetailV2");
     const closing = partAsidePanel === next;
     partAsidePanel = closing ? null : next;
     if (layout) {
@@ -5628,16 +5984,37 @@ partDetail.addEventListener("click", (event) => {
     if (!partOptionsMenuOpen) {
       partOptionsSearchQuery = "";
     }
-    renderApp();
-    if (partOptionsMenuOpen) {
-      focusPartOptionsSearch();
+    const wrap = optionsToggle.closest(".partOptionsWrap") || partDetail.querySelector(".partOptionsWrap");
+    const part = getSelectedBomPart() || getOpenedPart();
+    const project = selectedProjectName || projects()[0] || "";
+    if (wrap && activeNavMode === "projects" && project) {
+      optionsToggle.classList.toggle("active", partOptionsMenuOpen);
+      optionsToggle.setAttribute("aria-expanded", partOptionsMenuOpen ? "true" : "false");
+      wrap.querySelector(".partOptionsMenu")?.remove();
+      if (partOptionsMenuOpen) {
+        wrap.insertAdjacentHTML("beforeend", renderProjectOptionsMenu(project));
+        focusPartOptionsSearch();
+      }
+    } else if (wrap && part) {
+      optionsToggle.classList.toggle("active", partOptionsMenuOpen);
+      optionsToggle.setAttribute("aria-expanded", partOptionsMenuOpen ? "true" : "false");
+      wrap.querySelector(".partOptionsMenu")?.remove();
+      if (partOptionsMenuOpen) {
+        wrap.insertAdjacentHTML("beforeend", renderPartOptionsMenu(part));
+        focusPartOptionsSearch();
+      }
+    } else {
+      renderApp();
+      if (partOptionsMenuOpen) {
+        focusPartOptionsSearch();
+      }
     }
     return;
   }
 
   if (event.target.closest("[data-part-panel-close]")) {
     partAsidePanel = null;
-    const layout = partDetail.querySelector(".partDetailLayout.partDetailV2");
+    const layout = partDetail.querySelector(".partDetailV2");
     if (layout) {
       layout.classList.remove("panel-open");
       const slot = layout.querySelector(".partAsideSlot");
@@ -5659,6 +6036,13 @@ partDetail.addEventListener("click", (event) => {
     return;
   }
 
+  const projectFavoriteBtn = event.target.closest("[data-project-favorite]");
+  if (projectFavoriteBtn) {
+    toggleProjectFavorite(projectFavoriteBtn.dataset.projectFavorite);
+    renderApp();
+    return;
+  }
+
   const cancelPartEdit = event.target.closest("[data-cancel-part-edit]");
   if (cancelPartEdit) {
     cancelOpenPartEdit();
@@ -5667,15 +6051,30 @@ partDetail.addEventListener("click", (event) => {
 
   const cancelAlternateEdit = event.target.closest("[data-cancel-alternate-edit]");
   if (cancelAlternateEdit) {
+    clearAlternateEditDraft();
     activeAlternateEditMode = false;
     renderApp();
     return;
   }
 
-  const addAlternatePicker = event.target.closest("[data-add-alternate-picker]");
-  if (addAlternatePicker) {
-    const part = getSelectedBomPart() || getOpenedPart();
-    if (part) openAlternateModal(part);
+  const addAlternateBlank = event.target.closest("[data-alternate-add-blank]");
+  if (addAlternateBlank) {
+    event.preventDefault();
+    insertBlankAlternateRow();
+    return;
+  }
+
+  const alternatePick = event.target.closest("[data-alternate-pick-item]");
+  if (alternatePick) {
+    event.preventDefault();
+    event.stopPropagation();
+    openSearchFilterPicker("alternateItem", alternatePick);
+    return;
+  }
+
+  const removeAlternateDraft = event.target.closest("[data-remove-alternate-draft]");
+  if (removeAlternateDraft) {
+    removeAlternateDraftRow(removeAlternateDraft.dataset.removeAlternateDraft);
     return;
   }
 
@@ -5707,7 +6106,7 @@ partDetail.addEventListener("click", (event) => {
   if (propertyTab) {
     activePropertyTab = propertyTab.dataset.propertyTab;
     if (activePropertyTab !== "attachments" || !activeAttachmentEditMode) {
-      activeAttachmentDraftCount = 0;
+      clearAttachmentEditDraft();
     }
     renderApp();
     return;
@@ -5748,7 +6147,8 @@ function cancelOpenPartEdit() {
   activePartEditMode = false;
   activeAttachmentEditMode = false;
   activeAlternateEditMode = false;
-  activeAttachmentDraftCount = 0;
+  clearAlternateEditDraft();
+  clearAttachmentEditDraft();
   partOptionsMenuOpen = false;
   partOptionsSearchQuery = "";
   if (openedPartNumber) {
@@ -5761,7 +6161,7 @@ function cancelOpenPartEdit() {
 
 function handlePartAction(action) {
   const part = getSelectedBomPart() || getOpenedPart();
-  if (action === "pull-main") {
+  if (action === "pull-main" || action === "refresh-remote") {
     pullMainFromRunner();
     return;
   }
@@ -5799,8 +6199,8 @@ function handlePartAction(action) {
     activePartEditMode = true;
     activeAttachmentEditMode = false;
     activeAlternateEditMode = false;
-    activeAlternateEditMode = false;
-    activeAttachmentDraftCount = 0;
+    clearAlternateEditDraft();
+    clearAttachmentEditDraft();
     partAsidePanel = null;
     partOptionsMenuOpen = false;
     selectedPartNumber = partKey(part);
@@ -5815,6 +6215,20 @@ function handlePartAction(action) {
     if (!opened) return;
     partOptionsMenuOpen = false;
     partOptionsSearchQuery = "";
+    if (activeAlternateEditMode) {
+      saveAlternateEditFromDraft().catch((error) => {
+        statusMessage = `Save failed: ${error.message}`;
+        renderApp();
+      });
+      return;
+    }
+    if (activeAttachmentEditMode) {
+      saveAttachmentEditFromDraft(partKey(opened)).catch((error) => {
+        statusMessage = `Attachment save failed: ${error.message}`;
+        renderApp();
+      });
+      return;
+    }
     handleSaveOpenPart(partKey(opened));
     return;
   }
@@ -5827,7 +6241,8 @@ function handlePartAction(action) {
     activePartEditMode = false;
     activeAttachmentEditMode = true;
     activeAlternateEditMode = false;
-    activeAttachmentDraftCount = 0;
+    clearAlternateEditDraft();
+    beginAttachmentEdit(part);
     partAsidePanel = null;
     partOptionsMenuOpen = false;
     statusMessage = `Editing attachments for ${partObjectLabel(part)}`;
@@ -5842,7 +6257,8 @@ function handlePartAction(action) {
     activePartEditMode = false;
     activeAttachmentEditMode = false;
     activeAlternateEditMode = true;
-    activeAttachmentDraftCount = 0;
+    clearAttachmentEditDraft();
+    beginAlternateEdit(part);
     partAsidePanel = null;
     partOptionsMenuOpen = false;
     statusMessage = `Editing alternates for ${partObjectLabel(part)}`;
@@ -5856,6 +6272,8 @@ function handlePartAction(action) {
     activePartEditMode = false;
     activeAttachmentEditMode = false;
     activeAlternateEditMode = false;
+    clearAlternateEditDraft();
+    clearAttachmentEditDraft();
     partAsidePanel = null;
     partOptionsMenuOpen = false;
     statusMessage = `Workflow actions are available on the part page for ${partObjectLabel(part)}`;
@@ -5915,7 +6333,7 @@ function handlePartAction(action) {
 }
 
 function handleProjectAction(action) {
-  if (action === "pull-main") {
+  if (action === "pull-main" || action === "refresh-remote") {
     pullMainFromRunner();
     return;
   }
@@ -5924,12 +6342,26 @@ function handleProjectAction(action) {
     return;
   }
   if (action === "edit-project") {
+    if (!requireProfileForEdit()) return;
     activeProjectEditMode = true;
+    partAsidePanel = null;
+    partOptionsMenuOpen = false;
+    statusMessage = `Editing project ${project}`;
     renderApp();
     return;
   }
-  if (action === "open-project-folder") {
-    openProjectFolder(project);
+  if (action === "save-project") {
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    saveSelectedProjectFromDetail(project);
+    return;
+  }
+  if (action === "cancel-project-edit") {
+    activeProjectEditMode = false;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    statusMessage = "Cancelled project edits";
+    renderApp();
     return;
   }
   if (action === "open-project-drive") {
@@ -5959,12 +6391,6 @@ function handleTabularAction(action) {
   }
   if (action === "export-tabular-json") {
     exportPartsJson();
-  }
-}
-
-function handleHistoryAction(action) {
-  if (action === "pull-main") {
-    pullMainFromRunner();
   }
 }
 
@@ -6153,6 +6579,16 @@ function deleteDraftRevision(part, performedAt = activityTimestamp()) {
   selectedPartNumber = fallback ? partKey(fallback) : null;
   openedPartNumber = selectedPartNumber;
   selectedBomPartNumber = selectedPartNumber;
+  activePartEditMode = false;
+  activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
+  clearAlternateEditDraft();
+  clearAttachmentEditDraft();
+  partOptionsMenuOpen = false;
+  partOptionsSearchQuery = "";
+  if (selectedPartNumber) {
+    window.history.replaceState({}, "", partUrl(selectedPartNumber));
+  }
 }
 
 function revisionWorkflowRecord(part, status, approval, mrTitle) {
@@ -6195,16 +6631,6 @@ function stampPartRevision(part, status) {
 function firstBlockedWorkflowMessage(rule) {
   const blocked = rule.criteria.find((item) => !item.met);
   return blocked ? `Workflow blocked: ${blocked.label}.` : "Workflow transition is not available.";
-}
-
-function openProjectFolder(project) {
-  activeNavMode = "home";
-  activeProjectEditMode = false;
-  searchInput.value = "";
-  stateFilter.value = "";
-  projectFilter.value = project;
-  statusMessage = `Opened project folder ${project}`;
-  renderApp();
 }
 
 function openPartLink(url, missingMessage) {
@@ -6344,6 +6770,11 @@ navigationTree.addEventListener("click", (event) => {
     if (preventPartNavigationDuringEdit(button.dataset.bomPartNumber)) {
       return;
     }
+    if (isNewTabModifierClick(event)) {
+      event.preventDefault();
+      moveToPart(button.dataset.bomPartNumber, { newTab: true });
+      return;
+    }
     selectedBomPartNumber = button.dataset.bomPartNumber;
     renderApp();
     return;
@@ -6458,19 +6889,53 @@ searchSuggestions.addEventListener("click", (event) => {
 });
 partContextMenu.addEventListener("click", (event) => {
   const actionButton = event.target.closest("[data-context-action]");
-  if (!actionButton) {
+  if (!actionButton || actionButton.disabled) {
     return;
   }
   if (partContextMenu.dataset.menuMode === "bom") {
     const childIdentifier = partContextMenu.dataset.bomPartNumber;
-    const parentIdentifier = partContextMenu.dataset.bomParentNumber || openedPartNumber;
-    hidePartContextMenu();
-    if (actionButton.dataset.contextAction === "bom-add") {
+    const partNumber = partContextMenu.dataset.partNumber;
+    const action = actionButton.dataset.contextAction;
+    if (action === "bom-add") {
+      hidePartContextMenu();
       insertBlankBomRow({ afterIdentifier: childIdentifier || "" });
       return;
     }
-    if (actionButton.dataset.contextAction === "bom-delete" && childIdentifier) {
+    if (action === "bom-delete" && childIdentifier) {
+      hidePartContextMenu();
       removeBomItem(childIdentifier);
+      return;
+    }
+    if (partNumber && ["open", "open-new-tab", "open-drive", "open-onshape", "open-work"].includes(action)) {
+      hidePartContextMenu();
+      handlePartNavigateContextAction(action, partNumber);
+      return;
+    }
+    hidePartContextMenu();
+    return;
+  }
+  if (partContextMenu.dataset.menuMode === "alternate") {
+    const rowId = partContextMenu.dataset.alternateRowId || "";
+    hidePartContextMenu();
+    if (actionButton.dataset.contextAction === "alternate-add") {
+      insertBlankAlternateRow({ afterId: rowId });
+      return;
+    }
+    if (actionButton.dataset.contextAction === "alternate-delete" && rowId) {
+      removeAlternateDraftRow(rowId);
+      return;
+    }
+    return;
+  }
+  if (partContextMenu.dataset.menuMode === "attachment") {
+    const rowId = partContextMenu.dataset.attachmentRowId || "";
+    hidePartContextMenu();
+    if (actionButton.dataset.contextAction === "attachment-add") {
+      insertBlankAttachmentRow({ afterId: rowId });
+      return;
+    }
+    if (actionButton.dataset.contextAction === "attachment-delete" && rowId) {
+      removeAttachmentDraftRow(rowId);
       return;
     }
     return;
@@ -6479,8 +6944,14 @@ partContextMenu.addEventListener("click", (event) => {
   if (!partNumber) {
     return;
   }
+  const action = actionButton.dataset.contextAction;
   hidePartContextMenu();
-  if (actionButton.dataset.contextAction === "open") {
+  handlePartNavigateContextAction(action, partNumber);
+});
+
+function handlePartNavigateContextAction(action, partNumber) {
+  const part = findPartByKey(partNumber);
+  if (action === "open") {
     if (preventPartNavigationDuringEdit(partNumber)) {
       return;
     }
@@ -6488,22 +6959,22 @@ partContextMenu.addEventListener("click", (event) => {
     openSelectedPart();
     return;
   }
-  if (actionButton.dataset.contextAction === "open-new-tab") {
+  if (action === "open-new-tab") {
     moveToPart(partNumber, { newTab: true });
     return;
   }
-  if (actionButton.dataset.contextAction === "edit") {
-    if (preventPartNavigationDuringEdit(partNumber)) {
-      return;
-    }
-    selectedPartNumber = partNumber;
-    openSelectedPart({ editMode: true });
+  if (action === "open-drive") {
+    openPartLink(documentUrl(part, "drive"), "No Google Drive link is set for this part");
     return;
   }
-  if (actionButton.dataset.contextAction === "favorite") {
-    toggleFavorite(partNumber);
+  if (action === "open-onshape") {
+    openPartLink(documentUrl(part, "onshape"), "No Onshape link is set for this part");
+    return;
   }
-});
+  if (action === "open-work") {
+    openPartLink(documentUrl(part, "work"), "No WI link is set for this part");
+  }
+}
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hidePartContextMenu();
@@ -6580,16 +7051,6 @@ tableHead.addEventListener("click", (event) => {
       direction: activeTableSort.column === column && activeTableSort.direction === "asc" ? "desc" : "asc"
     };
     renderApp();
-    return;
-  }
-  const historySortButton = event.target.closest("[data-history-sort]");
-  if (historySortButton && activeNavMode === "history") {
-    const column = historySortButton.dataset.historySort;
-    activeHistorySort = {
-      column,
-      direction: activeHistorySort.column === column && activeHistorySort.direction === "asc" ? "desc" : "asc"
-    };
-    renderApp();
   }
 });
 
@@ -6608,29 +7069,17 @@ tableHead.addEventListener("input", (event) => {
     const nextInput = tableHead.querySelector(`[data-table-filter="${CSS.escape(filterKey)}"]`);
     nextInput?.focus();
     nextInput?.setSelectionRange(cursor, cursor);
-    return;
   }
-  const historyFilterInput = event.target.closest("[data-history-filter]");
-  if (!historyFilterInput || activeNavMode !== "history") {
-    return;
-  }
-  historyColumnFilters = {
-    ...historyColumnFilters,
-    [historyFilterInput.dataset.historyFilter]: historyFilterInput.value
-  };
-  const filterKey = historyFilterInput.dataset.historyFilter;
-  const cursor = historyFilterInput.selectionStart ?? historyFilterInput.value.length;
-  renderSearchWorkspace();
-  enableColumnResizing();
-  syncChrome();
-  const nextInput = tableHead.querySelector(`[data-history-filter="${CSS.escape(filterKey)}"]`);
-  nextInput?.focus();
-  nextInput?.setSelectionRange(cursor, cursor);
 });
 
 navItems.forEach((button) => {
-  button.addEventListener("click", () => {
-    openWorkspaceTab(button.dataset.navMode, {}, { activate: true });
+  button.addEventListener("click", (event) => {
+    const newTab = isNewTabModifierClick(event);
+    openWorkspaceTab(button.dataset.navMode, {}, {
+      activate: true,
+      forceNew: newTab,
+      replaceActive: !newTab
+    });
   });
 });
 
@@ -6751,7 +7200,12 @@ appSidebar?.addEventListener("click", (event) => {
 
   const library = event.target.closest("[data-open-tab]");
   if (library) {
-    openWorkspaceTab(library.dataset.openTab, {}, { activate: true });
+    const newTab = isNewTabModifierClick(event);
+    openWorkspaceTab(library.dataset.openTab, {}, {
+      activate: true,
+      forceNew: newTab,
+      replaceActive: !newTab
+    });
     return;
   }
 
@@ -6790,8 +7244,22 @@ appSidebar?.addEventListener("click", (event) => {
 
   const openPart = event.target.closest("[data-open-part]");
   if (openPart) {
-    moveToPart(openPart.dataset.openPart);
+    moveToPart(openPart.dataset.openPart, { newTab: isNewTabModifierClick(event) });
+    return;
   }
+
+  const openProject = event.target.closest("[data-open-project]");
+  if (openProject) {
+    openFavoriteProject(openProject.dataset.openProject, { newTab: isNewTabModifierClick(event) });
+  }
+});
+
+appSidebar?.addEventListener("contextmenu", (event) => {
+  const openPart = event.target.closest("[data-open-part]");
+  if (!openPart) {
+    return;
+  }
+  showPartContextMenu(event, openPart.dataset.openPart);
 });
 
 document.addEventListener("click", (event) => {
@@ -6956,6 +7424,9 @@ partsList.addEventListener("click", (event) => {
   if (projectCard && activeNavMode === "projects") {
     selectedProjectName = projectCard.dataset.projectName;
     activeProjectEditMode = false;
+    partAsidePanel = null;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
     renderApp();
     return;
   }
@@ -7100,6 +7571,8 @@ partsList.addEventListener("click", (event) => {
     activePartEditMode = true;
     activeAttachmentEditMode = false;
     activeAlternateEditMode = false;
+    clearAlternateEditDraft();
+    clearAttachmentEditDraft();
     renderApp();
     const field = gateJumpButton.dataset.gateJump;
     const target = document.querySelector(`[data-open-part-field="${field}"]`);
@@ -7723,11 +8196,82 @@ async function handleSaveOpenPart(originalPartNumber) {
 
 async function handleSaveAttachments(originalPartNumber) {
   try {
-    await saveAttachmentsFromForm(originalPartNumber);
+    await saveAttachmentEditFromDraft(originalPartNumber);
   } catch (error) {
     statusMessage = `Attachment save failed: ${error.message}`;
     renderApp();
   }
+}
+
+async function saveAttachmentEditFromDraft(originalPartNumber) {
+  if (!requireProfileForEdit()) return;
+  const part = findPartByKey(originalPartNumber) || getOpenedPart() || getSelectedBomPart();
+  if (!part || !Array.isArray(attachmentEditDraft)) {
+    return;
+  }
+  const savedRows = [];
+  for (const row of attachmentEditDraft) {
+    const title = String(row.title || "").trim();
+    const url = String(row.url || "").trim();
+    if (!title && !url) continue;
+    if (!title || !url) {
+      statusMessage = "Attachment title and link are required";
+      renderApp();
+      return;
+    }
+    savedRows.push({
+      type: attachmentTypeLabel({ type: row.type || "OTHER ATTACHMENTS" }),
+      title,
+      url
+    });
+  }
+  const previousKeys = attachmentsForPart(part).map((record) => attachmentRecordKey(record)).filter(Boolean);
+  if (previousKeys.length) {
+    part.attachments = removeAttachmentRecords(part.attachments, previousKeys);
+    part.documents = removeAttachmentRecords(part.documents, previousKeys);
+  }
+  part.attachments = [...asArray(part.attachments), ...savedRows];
+  const editor = currentEditorName();
+  const today = new Date().toISOString().slice(0, 10);
+  part.owner = editor;
+  part.updated_by = editor;
+  part.updated_at = today;
+  appendPartActivity(part, "updated_attachments", `Updated attachments for ${partObjectLabel(part)}`, {
+    actor: editor
+  });
+  part.revision_properties = {
+    ...(part.revision_properties || {}),
+    schema: "peak.revision.v1",
+    object_id: partKey(part),
+    part_number: part.part_number,
+    revision: part.revision || "A",
+    release_status: revisionStatusValue(part),
+    owner: part.owner,
+    created_by: part.created_by || part.owner,
+    created_at: part.created_at,
+    updated_by: part.updated_by,
+    updated_at: part.updated_at,
+    based_on: part.based_on || null,
+    approvers: part.approvers || [],
+    bom: part.bom || [],
+    attachments: part.attachments || [],
+    activity_history: part.activity_history || [],
+    change_summary: part.change_summary || "",
+    workflow: part.workflow || part.revision_properties?.workflow || null
+  };
+  selectedPartNumber = partKey(part);
+  selectedBomPartNumber = partKey(part);
+  openedPartNumber = partKey(part);
+  activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
+  clearAttachmentEditDraft();
+  clearAlternateEditDraft();
+  partOptionsMenuOpen = false;
+  partOptionsSearchQuery = "";
+  statusMessage = `Saved attachments for ${partObjectLabel(part)} locally; pushing to ${productDataRemoteLabel()}.`;
+  renderApp();
+  await persistLocalChanges();
+  await pushDraftPartChangesToRunner(part, { commitMessage: `Update attachments ${partObjectLabel(part)}` });
 }
 
 async function saveOpenPartFromForm(originalPartNumber) {
@@ -7744,6 +8288,10 @@ async function saveOpenPartFromForm(originalPartNumber) {
   }
   const fields = document.querySelectorAll("[data-open-part-field]");
   const values = Object.fromEntries([...fields].map((field) => [field.dataset.openPartField, field.value.trim()]));
+  const nameInput = document.querySelector(".partDetailNameInput[data-open-part-field='name']");
+  if (nameInput) {
+    values.name = nameInput.value.trim();
+  }
   values.name ??= part.name || "";
   values.description ??= part.description || "";
   values.legacy_part_number ??= legacyPartNumberValue(part);
@@ -7843,7 +8391,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
   activePartEditMode = false;
   activeAttachmentEditMode = false;
   activeAlternateEditMode = false;
-  activeAttachmentDraftCount = 0;
+  clearAlternateEditDraft();
+  clearAttachmentEditDraft();
   statusMessage = `Saved ${partObjectLabel(part)} locally; pushing draft edit to ${productDataRemoteLabel()}.`;
   window.history.replaceState({}, "", partUrl(partKey(part)));
   renderProjectOptions();
@@ -7853,92 +8402,7 @@ async function saveOpenPartFromForm(originalPartNumber) {
 }
 
 async function saveAttachmentsFromForm(originalPartNumber) {
-  if (!requireProfileForEdit()) return;
-  const part = findPartByKey(originalPartNumber);
-  if (!part) {
-    return;
-  }
-  const newAttachments = attachmentRowsFromForm();
-  if (newAttachments === null) {
-    renderApp();
-    return;
-  }
-  const removedAttachmentKeys = attachmentRemovalKeysFromForm();
-  const editor = currentEditorName();
-  const today = new Date().toISOString().slice(0, 10);
-  if (removedAttachmentKeys.length) {
-    part.attachments = removeAttachmentRecords(part.attachments, removedAttachmentKeys);
-    part.documents = removeAttachmentRecords(part.documents, removedAttachmentKeys);
-  }
-  if (newAttachments.length) {
-    part.attachments = [...asArray(part.attachments), ...newAttachments];
-  }
-  part.owner = editor;
-  part.updated_by = editor;
-  part.updated_at = today;
-  appendPartActivity(part, "updated_attachments", `Updated attachments for ${partObjectLabel(part)}`, {
-    actor: editor
-  });
-  part.revision_properties = {
-    ...(part.revision_properties || {}),
-    schema: "peak.revision.v1",
-    object_id: partKey(part),
-    part_number: part.part_number,
-    revision: part.revision || "A",
-    release_status: revisionStatusValue(part),
-    owner: part.owner,
-    created_by: part.created_by || part.owner,
-    created_at: part.created_at,
-    updated_by: part.updated_by,
-    updated_at: part.updated_at,
-    based_on: part.based_on || null,
-    approvers: part.approvers || [],
-    bom: part.bom || [],
-    attachments: part.attachments || [],
-    activity_history: part.activity_history || [],
-    change_summary: part.change_summary || "",
-    workflow: part.workflow || part.revision_properties?.workflow || null
-  };
-  selectedPartNumber = partKey(part);
-  selectedBomPartNumber = partKey(part);
-  openedPartNumber = partKey(part);
-  activeAttachmentEditMode = false;
-  activeAlternateEditMode = false;
-  activeAttachmentDraftCount = 0;
-  statusMessage = `Saved attachments for ${partObjectLabel(part)} locally; pushing to ${productDataRemoteLabel()}.`;
-  renderApp();
-  await persistLocalChanges();
-  await pushDraftPartChangesToRunner(part, { commitMessage: `Update attachments ${partObjectLabel(part)}` });
-}
-
-function attachmentRowsFromForm() {
-  const rows = [...document.querySelectorAll("[data-attachment-row]")];
-  const attachments = [];
-  for (const row of rows) {
-    const values = Object.fromEntries(
-      [...row.querySelectorAll("[data-attachment-field]")].map((field) => [field.dataset.attachmentField, field.value.trim()])
-    );
-    if (!values.title && !values.url) {
-      continue;
-    }
-    if (!values.title || !values.url) {
-      statusMessage = "Attachment title and link are required";
-      return null;
-    }
-    const type = attachmentTypeLabel({ type: values.type || "OTHER ATTACHMENTS" });
-    attachments.push({
-      type,
-      title: values.title,
-      url: values.url
-    });
-  }
-  return attachments;
-}
-
-function attachmentRemovalKeysFromForm() {
-  return [...document.querySelectorAll("[data-remove-attachment][data-restore-attachment]")]
-    .map((button) => button.dataset.removeAttachment)
-    .filter(Boolean);
+  await saveAttachmentEditFromDraft(originalPartNumber);
 }
 
 function removeAttachmentRecords(records, removalKeys) {
