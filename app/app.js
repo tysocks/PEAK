@@ -18,6 +18,9 @@ const workspace = document.querySelector(".workspace");
 const navigatorPane = document.querySelector(".navigatorPane");
 const tabListEl = document.querySelector("#tabList");
 const workspaceHost = document.querySelector("#workspaceHost");
+const primaryPane = document.querySelector(".primaryPane");
+const workspaceEmptyState = document.querySelector("#workspaceEmptyState");
+const workspaceOpenItem = document.querySelector("#workspaceOpenItem");
 const secondaryPane = document.querySelector(".secondaryPane");
 const splitResizer = document.querySelector("#splitResizer");
 const favoritesListEl = document.querySelector("#favoritesList");
@@ -27,6 +30,11 @@ const sidebarHomeView = document.querySelector("#sidebarHomeView");
 const sidebarInboxView = document.querySelector("#sidebarInboxView");
 const createModal = document.querySelector("#createModal");
 const createModalBody = document.querySelector("#createModalBody");
+const settingsModal = document.querySelector("#settingsModal");
+const settingsModalBody = document.querySelector("#settingsModalBody");
+const alternateModal = document.querySelector("#alternateModal");
+const alternateSearchInput = document.querySelector("#alternateSearchInput");
+const alternateModalList = document.querySelector("#alternateModalList");
 const searchModal = document.querySelector("#searchModal");
 const searchModalList = document.querySelector("#searchModalList");
 const searchModalPreview = document.querySelector("#searchModalPreview");
@@ -50,6 +58,10 @@ if (navigator.userAgent.includes("Electron")) {
   document.documentElement.classList.add("peak-electron");
 }
 
+if (navigator.userAgent.includes("Electron")) {
+  document.documentElement.classList.add("peak-electron");
+}
+
 let parts = [];
 let selectedPartNumber = null;
 let openedPartNumber = null;
@@ -58,18 +70,24 @@ let selectedProjectName = "";
 let activeNavMode = "home";
 let activePartEditMode = false;
 let activeAttachmentEditMode = false;
+let activeAlternateEditMode = false;
 let activeProjectEditMode = false;
-let activeCreateMode = "hub";
+let activeCreateMode = "new";
+let createModalSeed = null;
+let alternateSourceKey = null;
+let pendingAlternateLinkKey = null;
 let activeResultView = "grid";
 let activePropertyTab = "overview";
-let partAsidePanel = null; // "info" | "options" | null
+let partAsidePanel = null; // "info" | null
+let partOptionsMenuOpen = false;
+let partOptionsSearchQuery = "";
 let activeAttachmentDraftCount = 0;
 let activeTableSort = { column: "part_number", direction: "asc" };
 let tableColumnFilters = {};
 let activeHistorySort = { column: "performed_at", direction: "desc" };
 let historyColumnFilters = {};
 let collapsedBomNodes = new Set();
-let activeBomAddParent = "";
+let bomPickerTargetId = "";
 let activeBomPaneWidthRatio = loadBomPaneWidthRatio();
 const bomColumnDefinitions = {
   item: { label: "Item", width: 260 },
@@ -80,7 +98,8 @@ const bomColumnDefinitions = {
 };
 const bomDefaultColumnOrder = ["item", "name", "quantity", "revision", "status"];
 let activeBomColumnOrder = loadBomColumnOrder();
-let activeSettingsTab = "setup";
+let activeSettingsTab = "profile";
+let settingsProfileFeedback = null;
 let activeColorScheme = localStorage.getItem("peakColorScheme") || "dark";
 let activeFontFamily = localStorage.getItem("peakFontFamily") || "inter";
 let activeFontSize = Number(localStorage.getItem("peakFontSize") || "14") || 14;
@@ -106,7 +125,8 @@ let splitViewEnabled = false;
 let sidebarOpen = localStorage.getItem("peakSidebarOpen") !== "0";
 let sidebarMode = "home";
 let favoritePartKeys = loadFavorites();
-let collapsedProjectFolders = loadCollapsedProjects();
+let expandedProjectFolders = loadExpandedProjects();
+let expandedSidebarBomNodes = loadExpandedSidebarBomNodes();
 let searchModalSelection = null;
 let searchFiltersVisible = true;
 let searchPreviewVisible = true;
@@ -210,20 +230,40 @@ function saveFavorites() {
   localStorage.setItem("peakFavorites", JSON.stringify(favoritePartKeys));
 }
 
-function loadCollapsedProjects() {
+function loadExpandedProjects() {
   try {
-    const values = JSON.parse(localStorage.getItem("peakCollapsedProjects") || "null");
-    if (Array.isArray(values)) {
-      return new Set(values.map(String));
+    const expanded = JSON.parse(localStorage.getItem("peakExpandedProjects") || "null");
+    if (Array.isArray(expanded)) {
+      return new Set(expanded.map(String));
     }
   } catch {
     /* ignore */
   }
-  return null;
+  return new Set();
 }
 
-function saveCollapsedProjects() {
-  localStorage.setItem("peakCollapsedProjects", JSON.stringify([...collapsedProjectFolders]));
+function saveExpandedProjects() {
+  localStorage.setItem("peakExpandedProjects", JSON.stringify([...expandedProjectFolders]));
+}
+
+function loadExpandedSidebarBomNodes() {
+  try {
+    const expanded = JSON.parse(localStorage.getItem("peakExpandedSidebarBom") || "null");
+    if (Array.isArray(expanded)) {
+      return new Set(expanded.map(String));
+    }
+  } catch {
+    /* ignore */
+  }
+  return new Set();
+}
+
+function saveExpandedSidebarBomNodes() {
+  localStorage.setItem("peakExpandedSidebarBom", JSON.stringify([...expandedSidebarBomNodes]));
+}
+
+function sidebarBomNodeId(projectName, partNumber) {
+  return `${projectName}::${partNumber}`;
 }
 
 function newTabId(prefix = "tab") {
@@ -260,6 +300,10 @@ function findTabByType(type, objectId = "") {
 }
 
 function openWorkspaceTab(type, payload = {}, { activate = true, forceNew = false } = {}) {
+  if (type === "settings") {
+    openSettingsModal(payload.section || "profile");
+    return null;
+  }
   let tab = forceNew ? null : findTabByType(type, payload.objectId || "");
   if (!tab) {
     tab = {
@@ -392,17 +436,23 @@ function closeWorkspaceTab(tabId) {
   renderSidebarChrome();
 }
 
+function setWorkspaceEmptyState(isEmpty) {
+  if (primaryPane) primaryPane.classList.toggle("is-empty", Boolean(isEmpty));
+  if (workspaceEmptyState) workspaceEmptyState.hidden = !isEmpty;
+  if (workspace) workspace.hidden = Boolean(isEmpty);
+}
+
 function renderEmptyWorkspace() {
   document.title = "PEAK";
+  activeNavMode = "";
   if (recordCount) recordCount.textContent = "No open tabs";
   if (workspaceHeading) workspaceHeading.textContent = "PEAK";
-  if (pageDescriptionEl) pageDescriptionEl.textContent = "Open a part from the sidebar, or use Projects, History, Table, or Report.";
+  if (pageDescriptionEl) pageDescriptionEl.textContent = "";
   if (tableHead) tableHead.innerHTML = "";
-  if (partsList) {
-    partsList.innerHTML = `<tr><td class="emptyCell" colspan="6">No tab open. Choose an item from the sidebar.</td></tr>`;
-  }
+  if (partsList) partsList.innerHTML = "";
   if (partDetail) partDetail.innerHTML = "";
   if (navigationTree) navigationTree.innerHTML = "";
+  setWorkspaceEmptyState(true);
 }
 
 function applyTabToWorkspace(tab) {
@@ -414,12 +464,14 @@ function applyTabToWorkspace(tab) {
     selectedBomPartNumber = objectId;
     activePartEditMode = Boolean(tab.payload?.editMode);
     activeAttachmentEditMode = false;
+    activeAlternateEditMode = false;
     activeAttachmentDraftCount = 0;
   } else {
     openedPartNumber = null;
     selectedBomPartNumber = null;
     activePartEditMode = false;
     activeAttachmentEditMode = false;
+    activeAlternateEditMode = false;
   }
   if (tab.type === "projects" && tab.payload?.projectName) {
     selectedProjectName = tab.payload.projectName;
@@ -598,56 +650,68 @@ function projectBomForest(projectName) {
   return { byPartNumber, childMap, roots };
 }
 
-function renderProjectBomNode(partNumber, forest, depth, visited) {
+function renderProjectBomNode(partNumber, forest, depth, visited, projectName) {
   const part = forest.byPartNumber.get(partNumber);
   if (!part) {
     return "";
   }
   const key = partKey(part);
   const active = activeNavMode === "part" && openedPartNumber === key;
-  const children = forest.childMap.get(partNumber) || [];
+  const children = (forest.childMap.get(partNumber) || []).filter((childPn) => !visited.has(childPn) && childPn !== partNumber);
+  const hasChildren = children.length > 0;
+  const nodeId = sidebarBomNodeId(projectName, partNumber);
+  const expanded = hasChildren && expandedSidebarBomNodes.has(nodeId);
   const nextVisited = new Set(visited);
   nextVisited.add(partNumber);
-  const childHtml = children
-    .filter((childPn) => !nextVisited.has(childPn))
-    .map((childPn) => renderProjectBomNode(childPn, forest, depth + 1, nextVisited))
-    .join("");
+  const childHtml = expanded
+    ? children
+      .map((childPn) => renderProjectBomNode(childPn, forest, depth + 1, nextVisited, projectName))
+      .join("")
+    : "";
+  const twist = hasChildren
+    ? `<button class="twist sidebarBomTwist${expanded ? " expanded" : ""}" type="button" data-toggle-sidebar-bom="${escapeHtml(nodeId)}" title="${expanded ? "Collapse" : "Expand"}" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(part.part_number)}" aria-expanded="${expanded}"></button>`
+    : `<span class="twistSpacer" aria-hidden="true"></span>`;
   return `
-    <div class="sidebarBomNode" style="padding-left:${depth * 14}px">
-      <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-part="${escapeHtml(key)}">
-        <span class="sidebarItemLabel">${escapeHtml(part.part_number)} · ${escapeHtml(part.name)}</span>
-      </button>
-      ${childHtml}
+    <div class="sidebarBomNode">
+      <div class="sidebarBomRow">
+        ${twist}
+        <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-part="${escapeHtml(key)}">
+          <span class="sidebarItemLabel">${escapeHtml(part.part_number)} · ${escapeHtml(part.name)}</span>
+        </button>
+      </div>
+      ${hasChildren ? `<div class="sidebarChildren${expanded ? " open" : ""}">${childHtml}</div>` : ""}
     </div>
   `;
 }
 
 function renderProjectsTree() {
   if (!projectsTreeEl) return;
-  if (collapsedProjectFolders === null) {
-    collapsedProjectFolders = new Set(projects());
-    saveCollapsedProjects();
-  }
   const names = projects();
   if (!names.length) {
     projectsTreeEl.innerHTML = `<p class="sidebarEmpty">No projects yet.</p>`;
     return;
   }
+  const header = document.querySelector("#projectsTreeSection .sidebarSectionHeader");
+  if (header) {
+    header.innerHTML = `<h3>Projects</h3>`;
+  }
   projectsTreeEl.innerHTML = names.map((project) => {
-    const expanded = !collapsedProjectFolders.has(project);
+    const expanded = expandedProjectFolders.has(project);
     const forest = projectBomForest(project);
     const rootCount = forest.roots.length;
     return `
       <div class="sidebarProject">
-        <button class="sidebarItem${expanded ? " expanded" : ""}" type="button" data-toggle-project="${escapeHtml(project)}">
+        <button class="sidebarItem sidebarProjectItem${expanded ? " expanded" : ""}" type="button" data-toggle-project="${escapeHtml(project)}" aria-expanded="${expanded}">
           <span class="twist" aria-hidden="true"></span>
           <span class="sidebarItemLabel">${escapeHtml(project)}</span>
           <span class="sidebarItemMeta">${rootCount}</span>
         </button>
         <div class="sidebarChildren${expanded ? " open" : ""}">
-          ${forest.roots.length
-            ? forest.roots.map((partNumber) => renderProjectBomNode(partNumber, forest, 0, new Set())).join("")
-            : `<p class="sidebarEmpty">No parts</p>`}
+          ${expanded
+            ? (forest.roots.length
+              ? forest.roots.map((partNumber) => renderProjectBomNode(partNumber, forest, 0, new Set(), project)).join("")
+              : `<p class="sidebarEmpty">No parts</p>`)
+            : ""}
         </div>
       </div>
     `;
@@ -655,7 +719,7 @@ function renderProjectsTree() {
 }
 
 function inboxItems() {
-  const me = (localStorage.getItem("peakDefaultOwner") || "").trim().toLowerCase();
+  const me = (getProfileUsername() || getProfileName() || "").trim().toLowerCase();
   return parts.filter((part) => {
     const owner = String(part.owner || part.updated_by || part.created_by || "").trim().toLowerCase();
     const approvers = asArray(part.approvers).map((item) => String(item?.name || item || "").trim().toLowerCase());
@@ -694,30 +758,68 @@ function toggleFavorite(partKeyValue) {
   renderFavoritesList();
 }
 
-function openCreateModal(mode = "hub") {
-  activeCreateMode = mode;
+function openCreateModal(mode = "new", seed = null) {
+  if (!requireProfileForEdit()) return;
+  activeCreateMode = ["new", "source", "revision"].includes(mode) ? mode : "new";
+  createModalSeed = seed || null;
   if (!createModal || !createModalBody) return;
   createModal.hidden = false;
   renderCreateModalBody();
+  const focusId = activeCreateMode === "revision"
+    ? "[data-submit-revision]"
+    : activeCreateMode === "source"
+      ? "#newPartBasedOnPicker"
+      : "#newPartName";
+  requestAnimationFrame(() => {
+    refreshNotionScrolls();
+    document.querySelector(focusId)?.focus();
+  });
 }
 
 function closeCreateModal() {
   if (createModal) createModal.hidden = true;
+  createModalSeed = null;
+  pendingAlternateLinkKey = null;
+  if (searchFilterPickerType === "basedOn") closeSearchFilterPicker();
+}
+
+function createModalTitleText(mode = activeCreateMode) {
+  if (pendingAlternateLinkKey) return "Create Alternate Item";
+  if (mode === "source") return "Create Item Based On";
+  if (mode === "revision") return "Create Revision";
+  return "New Part";
+}
+
+function syncCreateModalTitle() {
+  const titleEl = document.querySelector("#createModalTitle");
+  if (titleEl) titleEl.textContent = createModalTitleText();
 }
 
 function renderCreateModalBody() {
   if (!createModalBody) return;
-  // Reuse create renderers by temporarily painting into a detached host via partsList swap.
+  syncCreateModalTitle();
   const previous = partsList.innerHTML;
   const previousHead = tableHead.innerHTML;
   renderCreateRows();
   createModalBody.innerHTML = partsList.innerHTML;
   partsList.innerHTML = previous;
   tableHead.innerHTML = previousHead;
-  // Create rows render table cells; unwrap to modal content.
   const cell = createModalBody.querySelector("td");
   if (cell) {
     createModalBody.innerHTML = cell.innerHTML;
+  }
+  const actions = createModalBody.querySelector(".createFormActions");
+  if (actions && !actions.querySelector(".editingAsLabel")) {
+    actions.insertAdjacentHTML("afterbegin", productEditUserLabel());
+  }
+  applyCreateModalSeed();
+}
+
+function applyCreateModalSeed() {
+  if (!createModalSeed) return;
+  if (activeCreateMode === "source" && createModalSeed.basedOn) {
+    const seeded = findPartByKey(createModalSeed.basedOn);
+    setCreateBasedOnSelection(seeded?.part_number || String(createModalSeed.basedOn).split("^")[0] || "");
   }
 }
 
@@ -811,36 +913,88 @@ function bomSubtreePartNumbers(rootPart) {
 }
 
 function closeSearchFilterPicker() {
+  document.querySelectorAll("[data-filter-picker][aria-expanded='true']").forEach((el) => {
+    el.setAttribute("aria-expanded", "false");
+  });
   searchFilterPickerType = null;
+  bomPickerTargetId = "";
   if (searchFilterPicker) searchFilterPicker.hidden = true;
   if (searchFilterPickerQuery) searchFilterPickerQuery.value = "";
 }
 
 function openSearchFilterPicker(type, anchor) {
   if (!searchFilterPicker || !anchor) return;
+  const nextBomTarget = type === "bomItem" ? (anchor.dataset.bomPickItem || "") : "";
   if (searchFilterPickerType === type && !searchFilterPicker.hidden) {
-    closeSearchFilterPicker();
-    return;
+    if (type !== "bomItem" || bomPickerTargetId === nextBomTarget) {
+      closeSearchFilterPicker();
+      return;
+    }
   }
   searchFilterPickerType = type;
   searchFilterPicker.hidden = false;
+  document.querySelectorAll("[data-filter-picker][aria-expanded='true']").forEach((el) => {
+    el.setAttribute("aria-expanded", "false");
+  });
+  anchor.setAttribute("aria-expanded", "true");
   if (searchFilterPickerQuery) {
     searchFilterPickerQuery.value = "";
     searchFilterPickerQuery.placeholder = type === "createdBy"
       ? "Filter people…"
       : type === "project"
         ? "Filter projects…"
-        : "Filter assemblies…";
+        : type === "basedOn" || type === "bomItem"
+          ? "Filter items…"
+          : "Filter assemblies…";
+  }
+  if (type === "bomItem") {
+    bomPickerTargetId = nextBomTarget;
+  } else {
+    bomPickerTargetId = "";
   }
   renderSearchFilterPickerOptions();
   const rect = anchor.getBoundingClientRect();
-  const width = 260;
+  const width = (type === "basedOn" || type === "bomItem")
+    ? Math.max(280, Math.min(420, rect.width || 280))
+    : 260;
+  searchFilterPicker.style.width = `${width}px`;
   const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left));
   const top = Math.min(window.innerHeight - 20, rect.bottom + 6);
   searchFilterPicker.style.left = `${left}px`;
   searchFilterPicker.style.top = `${top}px`;
   searchFilterPickerQuery?.focus();
   requestAnimationFrame(refreshNotionScrolls);
+}
+
+function basedOnPickerOptions() {
+  return groupedPartResults(parts).map((group) => {
+    const part = group.representative;
+    return {
+      value: group.part_number,
+      label: `${part.part_number}^${part.revision || "A"} · ${part.name || "Untitled"}`
+    };
+  });
+}
+
+function basedOnPickerLabel(partNumber) {
+  if (!partNumber) return "Select item";
+  const part = latestRevisionForPart(partNumber) || findPartByKey(partNumber);
+  if (!part) return partNumber;
+  return `${part.part_number}^${part.revision || "A"} · ${part.name || "Untitled"}`;
+}
+
+function setCreateBasedOnSelection(partNumber) {
+  const value = String(partNumber || "").trim();
+  const input = document.querySelector("#newPartBasedOn");
+  const label = document.querySelector("#newPartBasedOnLabel");
+  if (input) input.value = value;
+  if (label) {
+    label.textContent = basedOnPickerLabel(value);
+    label.classList.toggle("is-placeholder", !value);
+  }
+  if (value) {
+    createModalSeed = { ...(createModalSeed || {}), basedOn: value };
+  }
 }
 
 function renderSearchFilterPickerOptions() {
@@ -856,13 +1010,29 @@ function renderSearchFilterPickerOptions() {
       value: name,
       label: name
     }));
+  } else if (searchFilterPickerType === "basedOn") {
+    options = basedOnPickerOptions();
+  } else if (searchFilterPickerType === "bomItem") {
+    const rootKey = partKey(getOpenedPart());
+    options = basedOnPickerOptions().filter((option) => {
+      const part = latestRevisionForPart(option.value) || findPartByKey(option.value);
+      return part && partKey(part) !== rootKey;
+    });
   }
   const filtered = options.filter((option) => !query || option.label.toLowerCase().includes(query));
   const selectedValue = searchFilterPickerType === "createdBy"
     ? searchCreatedBy
     : searchFilterPickerType === "in"
       ? searchInBomRoot
-      : searchProject;
+      : searchFilterPickerType === "project"
+        ? searchProject
+        : searchFilterPickerType === "basedOn"
+          ? (document.querySelector("#newPartBasedOn")?.value || "")
+          : (() => {
+              const owner = findBomItemOwner(bomPickerTargetId);
+              const child = resolveBomChild(owner?.item);
+              return child?.part_number || "";
+            })();
   searchFilterPickerList.innerHTML = filtered.length
     ? filtered.map((option) => `
         <button class="searchFilterOption${option.value === selectedValue ? " active" : ""}" type="button" data-search-filter-value="${escapeHtml(option.value)}">
@@ -880,6 +1050,14 @@ function applySearchFilterPickerValue(value) {
     searchInBomRoot = searchInBomRoot === value ? "" : value;
   } else if (searchFilterPickerType === "project") {
     searchProject = searchProject === value ? "" : value;
+  } else if (searchFilterPickerType === "basedOn") {
+    setCreateBasedOnSelection(value);
+    closeSearchFilterPicker();
+    return;
+  } else if (searchFilterPickerType === "bomItem") {
+    assignBomRowPart(bomPickerTargetId, value);
+    closeSearchFilterPicker();
+    return;
   }
   closeSearchFilterPicker();
   syncSearchModalChrome();
@@ -924,6 +1102,28 @@ function refreshNotionScrolls() {
   document.querySelectorAll("[data-notion-scroll]").forEach(bindNotionScroll);
 }
 
+function renderSearchModalPreviewOnly() {
+  if (!searchModalPreview) return;
+  const selected = findPartByKey(searchModalSelection);
+  searchModalPreview.innerHTML = selected
+    ? renderSearchModalPreview(selected)
+    : `<p class="empty">Select a result to preview</p>`;
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function syncSearchModalListSelection() {
+  if (!searchModalList) return;
+  searchModalList.querySelectorAll("[data-search-select]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.searchSelect === searchModalSelection);
+  });
+}
+
+function selectSearchModalResult(key) {
+  searchModalSelection = key || null;
+  syncSearchModalListSelection();
+  renderSearchModalPreviewOnly();
+}
+
 function renderSearchModalResults() {
   if (!searchModalList || !searchModalPreview) return;
   syncSearchModalChrome();
@@ -944,29 +1144,34 @@ function renderSearchModalResults() {
       `;
     }).join("")
     : `<p class="sidebarEmpty">No matching parts</p>`;
-  const selected = findPartByKey(searchModalSelection);
-  searchModalPreview.innerHTML = selected
-    ? `
-      <section class="propertySection">
-        <h3 class="searchPreviewTitle">${escapeHtml(partObjectLabel(selected))}</h3>
-        <p class="searchPreviewSubtitle">${escapeHtml(selected.name)}</p>
-        <dl class="propertyGrid">
-          ${property("Project", selected.project || "Unassigned")}
-          ${property("Part Maturity", maturityStageLabel(selected))}
-          ${property("Release Status", releaseStatusLabel(selected))}
-          ${property("Revision", selected.revision || "A")}
-          ${property("Created By", createdBy(selected))}
-          ${property("Last Updated By", updatedBy(selected))}
-          ${property("Traceability", traceabilityLabel(selected))}
-          ${property("Description", selected.description || "Not set")}
-        </dl>
-        <div class="partEditActions">
-          <button class="iconButton primaryAction formAction" type="button" data-search-open="${escapeHtml(partKey(selected))}">Open</button>
-        </div>
-      </section>
-    `
-    : `<p class="empty">Select a result to preview</p>`;
-  requestAnimationFrame(refreshNotionScrolls);
+  renderSearchModalPreviewOnly();
+}
+
+function renderSearchModalPreview(part) {
+  const legacyPartNumber = legacyPartNumberValue(part);
+  const propertyRows = [
+    property("Description", part.description || "Not set"),
+    property("Revision Description", part.change_summary || "Not set"),
+    property("Project", part.project || "Unassigned"),
+    property("Traceability", traceabilityLabel(part)),
+    property("Legacy Number", legacyPartNumber || "Not set"),
+    property("Cost", optionalPartPropertyValue(part, "cost") || "Not set"),
+    property("Mass", optionalPartPropertyValue(part, "mass") || "Not set"),
+    propertyHtml("Based On", basedOnLink(part))
+  ].filter(Boolean);
+
+  return `
+    <div class="searchPreviewDetail" data-search-open="${escapeHtml(partKey(part))}" title="Open part">
+      <header class="searchPreviewHeader">
+        <h3 class="searchPreviewTitle">${escapeHtml(part.name || "Untitled")}</h3>
+        <p class="searchPreviewSubtitle">${escapeHtml(mostRecentlyReleasedLabel(part))}</p>
+      </header>
+      <div class="partCombinedLayout searchPreviewBody">
+        ${detailSection("", propertyRows)}
+        ${renderInlineWorkflow(part)}
+      </div>
+    </div>
+  `;
 }
 
 function escapeHtml(value) {
@@ -1227,7 +1432,7 @@ function inferProjectsFromParts(sourceParts) {
     inferred.set(part.project, {
       name: part.project,
       key: projectKeyFromName(part.project),
-      owner: part.owner || "engineering@example.com",
+      owner: part.owner || currentEditorName() || "",
       approvers: [],
       description: `${part.project} project records`,
       drive_url: "",
@@ -1368,9 +1573,11 @@ async function selectProductDataFolder() {
     localStorage.setItem("peakProductDataFolderName", productDataFolderName);
     await saveProductDataHandle(handle);
     await reloadProductDataFromFolder();
+    refreshSettingsSurfaces();
   } catch (error) {
     if (error.name !== "AbortError") {
       statusMessage = `Could not select product data folder: ${error.message}`;
+      refreshSettingsSurfaces();
       renderApp();
     }
   }
@@ -1407,9 +1614,11 @@ async function selectProductDataFolderFromDesktop() {
     selectedBomPartNumber = selectedPartNumber;
     renderProjectOptions();
     statusMessage = payload.message || `Using product data folder ${productDataFolderName}`;
+    refreshSettingsSurfaces();
     renderApp();
   } catch (error) {
     statusMessage = `Could not select product data folder: ${runnerErrorMessage(error)}`;
+    refreshSettingsSurfaces();
     renderApp();
   }
 }
@@ -1525,6 +1734,7 @@ function normalizeRevisionRecord(partProperties, revisionProperties) {
     documents: asArray(revisionProperties.attachments || revisionProperties.documents),
     attachments: asArray(revisionProperties.attachments || revisionProperties.documents),
     tags: asArray(partProperties.tags || revisionProperties.tags),
+    alternates: normalizeAlternateList(partProperties.alternates || revisionProperties.alternates),
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
@@ -1838,47 +2048,15 @@ function searchMatches(query) {
   return parts.filter((part) => matchesSearch(part, trimmed)).slice(0, 8);
 }
 
-function renderBasedOnSuggestions(query) {
-  const input = document.querySelector("#newPartBasedOn");
-  const container = document.querySelector("#basedOnSuggestions");
-  if (!container) return;
-  const trimmed = query.trim();
-  if (!trimmed) {
-    container.hidden = true;
-    container.innerHTML = "";
-    return;
-  }
-  const matches = groupedPartResults(
-    parts.filter((part) => matchesSearch(part, trimmed))
-  ).slice(0, 10);
-  if (!matches.length) {
-    container.hidden = true;
-    container.innerHTML = "";
-    return;
-  }
-  container.innerHTML = matches
-    .map((group) => `
-      <button class="suggestionItem" type="button" role="option" data-based-on-part="${escapeHtml(group.part_number)}">
-        <span>${escapeHtml(group.part_number)}</span>
-        <small>${escapeHtml(group.representative.name)}</small>
-      </button>
-    `)
-    .join("");
-  if (input) {
-    const rect = input.getBoundingClientRect();
-    container.style.top = `${rect.bottom + 4}px`;
-    container.style.left = `${rect.left}px`;
-    container.style.width = `${rect.width}px`;
-  }
-  container.hidden = false;
-}
-
 function getOpenedPart() {
   return findPartByKey(openedPartNumber);
 }
 
 function getSelectedBomPart() {
-  return findPartByKey(selectedBomPartNumber || openedPartNumber);
+  if (selectedBomPartNumber && String(selectedBomPartNumber).startsWith("blank:")) {
+    return findPartByKey(openedPartNumber);
+  }
+  return findPartByKey(selectedBomPartNumber || openedPartNumber) || findPartByKey(openedPartNumber);
 }
 
 function partEditNavigationLocked() {
@@ -1901,6 +2079,7 @@ function preventPartNavigationDuringEdit(targetIdentifier) {
   selectedPartNumber = openedPartNumber;
   selectedBomPartNumber = openedPartNumber;
   activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
   activeAttachmentDraftCount = 0;
   statusMessage = "Save or cancel the current part edit before opening another part";
   window.history.replaceState({}, "", partUrl(openedPartNumber, { editMode: true }));
@@ -2198,10 +2377,6 @@ function renderReportRows(visibleParts) {
 }
 
 function renderCreateRows() {
-  if (activeCreateMode === "new") {
-    renderCreateItemRows({ fromSource: false });
-    return;
-  }
   if (activeCreateMode === "source") {
     renderCreateItemRows({ fromSource: true });
     return;
@@ -2210,65 +2385,36 @@ function renderCreateRows() {
     renderCreateRevisionRows();
     return;
   }
-  if (activeCreateMode === "project") {
-    renderCreateProjectRows();
-    return;
-  }
-  renderCreateHubRows();
-}
-
-function renderCreateHubRows() {
-  tableHead.innerHTML = "";
-  partsList.innerHTML = `
-    <tr class="createHubRow">
-      <td colspan="10">
-        <div class="createPage">
-          <div class="createPageIntro">
-            <h2>Create</h2>
-            <p>Start a draft part, revision, or project. Drafts stay local until you save and push.</p>
-          </div>
-          <div class="createHub" aria-label="Create options">
-            <button class="createTile" type="button" data-create-mode="new">
-              <strong>New Part</strong>
-              <span>Start a new draft part at revision A.</span>
-            </button>
-            <button class="createTile" type="button" data-create-mode="source">
-              <strong>From Source</strong>
-              <span>Create a related draft from an existing part.</span>
-            </button>
-            <button class="createTile" type="button" data-create-mode="revision">
-              <strong>New Revision</strong>
-              <span>Open the next draft revision for an existing part.</span>
-            </button>
-            <button class="createTile" type="button" data-create-mode="project">
-              <strong>New Project</strong>
-              <span>Add project metadata to the product data repository.</span>
-            </button>
-          </div>
-        </div>
-      </td>
-    </tr>
-  `;
+  renderCreateItemRows({ fromSource: false });
 }
 
 function renderCreateItemRows({ fromSource }) {
   tableHead.innerHTML = "";
-  const projectOptions = ['<option value="">No project</option>', ...projects()
-    .map((project) => `<option value="${escapeHtml(project)}">${escapeHtml(project)}</option>`)
+  const projectNames = projects();
+  const selectedProject = projectNames.includes(projectFilter.value)
+    ? projectFilter.value
+    : (projectNames[0] || "");
+  const generatedPartNumber = selectedProject ? nextProjectPartNumber(selectedProject) : "";
+  const projectOptions = [
+    `<option value="">Select project</option>`,
+    ...projectNames.map((project) => `<option value="${escapeHtml(project)}"${project === selectedProject ? " selected" : ""}>${escapeHtml(project)}</option>`)
   ].join("");
-  const selectedProject = projectFilter.value || projects()[0] || "Unassigned Project";
-  const generatedPartNumber = nextProjectPartNumber(selectedProject);
+  const basedOnSelected = (() => {
+    if (!fromSource || !createModalSeed?.basedOn) return "";
+    const seeded = findPartByKey(createModalSeed.basedOn);
+    return seeded?.part_number || String(createModalSeed.basedOn).split("^")[0] || "";
+  })();
+  const basedOnLabel = basedOnPickerLabel(basedOnSelected);
   const sourceField = fromSource
     ? `
       <div class="createFormField">
         <div class="createFormMeta">
-          <label class="createFormLabel" for="newPartBasedOn">Based On</label>
-          <span class="createFormHint">Search by part number or name</span>
+          <label class="createFormLabel" for="newPartBasedOnPicker">Based On <span class="requiredMark" aria-hidden="true">*</span></label>
         </div>
-        <div class="createFormDropWrap">
-          <input class="tableInput createFormInput" id="newPartBasedOn" value="" placeholder="Search part number or name" autocomplete="off">
-          <div id="basedOnSuggestions" class="createFormSuggestions" role="listbox" hidden></div>
-        </div>
+        <button class="createFormPickerBtn" id="newPartBasedOnPicker" type="button" data-filter-picker="basedOn" aria-haspopup="listbox" aria-expanded="false">
+          <span id="newPartBasedOnLabel" class="${basedOnSelected ? "" : "is-placeholder"}">${escapeHtml(basedOnLabel)}</span>
+        </button>
+        <input type="hidden" id="newPartBasedOn" value="${escapeHtml(basedOnSelected)}" required>
       </div>
     `
     : "";
@@ -2276,81 +2422,87 @@ function renderCreateItemRows({ fromSource }) {
     <tr class="createFormRow">
       <td colspan="10">
         <div class="createForm">
-          ${renderCreatePageIntro(fromSource ? "From Source" : "New Part", fromSource
-            ? "Create a related draft from an existing part. Opens in edit mode after creation."
-            : "Start a new draft part at revision A. Opens in edit mode after creation.")}
-          <div class="createFormField">
+          <div class="createFormField createFormFieldName">
             <div class="createFormMeta">
-              <label class="createFormLabel" for="newPartProject">Project</label>
-              <span class="createFormHint">Optional for tooling or non-BOM records</span>
+              <label class="createFormLabel" for="newPartName">Name <span class="requiredMark" aria-hidden="true">*</span></label>
             </div>
-            <select class="tableInput createFormInput" id="newPartProject">${projectOptions}</select>
+            <input class="tableInput createFormInput createFormNameInput" id="newPartName" value="" required>
+          </div>
+          <div class="createFormField createFormFieldInline">
+            <div class="createFormInlinePair">
+              <div class="createFormField">
+                <div class="createFormMeta">
+                  <label class="createFormLabel" for="newPartNumber">Part Number <span class="requiredMark" aria-hidden="true">*</span></label>
+                </div>
+                <input class="tableInput createFormInput" id="newPartNumber" value="${escapeHtml(generatedPartNumber)}" required>
+              </div>
+              <div class="createFormField createFormFieldRevision">
+                <div class="createFormMeta">
+                  <label class="createFormLabel" for="newPartRevision">Revision</label>
+                </div>
+                <input class="tableInput createFormInput" id="newPartRevision" value="A" readonly tabindex="-1" aria-readonly="true">
+              </div>
+            </div>
           </div>
           <div class="createFormField">
             <div class="createFormMeta">
-              <label class="createFormLabel" for="newPartNumber">Part Number</label>
-              <span class="createFormHint">Auto-filled with next available number; can be overwritten</span>
+              <label class="createFormLabel" for="newPartProject">Project <span class="requiredMark" aria-hidden="true">*</span></label>
             </div>
-            <input class="tableInput createFormInput" id="newPartNumber" value="${escapeHtml(generatedPartNumber)}">
-          </div>
-          <div class="createFormField">
-            <div class="createFormMeta">
-              <label class="createFormLabel" for="newPartName">Name</label>
-              <span class="createFormHint">Name of the part</span>
-            </div>
-            <input class="tableInput createFormInput" id="newPartName" value="">
+            <select class="tableInput createFormInput createFormProjectInput" id="newPartProject" required>${projectOptions}</select>
           </div>
           ${sourceField}
           <div class="createFormActions">
-            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub">Cancel</button>
-            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-create="${fromSource ? "source" : "new"}">Create</button>
+            <button class="createSubmitIcon" type="button" data-submit-create="${fromSource ? "source" : "new"}" title="Create" aria-label="Create"></button>
           </div>
         </div>
       </td>
     </tr>
   `;
-  const projectSelect = document.querySelector("#newPartProject");
-  if (projectSelect && projects().includes(selectedProject)) {
-    projectSelect.value = selectedProject;
-  }
 }
 
 function renderCreateRevisionRows() {
   tableHead.innerHTML = "";
-  const partOptions = groupedPartResults(parts)
-    .map((group) => `<option value="${escapeHtml(group.part_number)}">${escapeHtml(group.part_number)} - ${escapeHtml(group.representative.name)}</option>`)
-    .join("");
-  const selectedBase = groupedPartResults(parts)[0]?.part_number || "";
+  const selectedBase = createModalSeed?.partNumber || "";
   const selectedSource = latestRevisionForPart(selectedBase);
+  const nextRevision = nextRevisionForPart(selectedSource);
+  const name = selectedSource?.name || "";
+  const partNumber = selectedSource?.part_number || selectedBase;
+  const project = selectedSource?.project || "";
   partsList.innerHTML = `
     <tr class="createFormRow">
       <td colspan="10">
-        <div class="createForm">
-          ${renderCreatePageIntro("New Revision", "Only one unreleased revision is allowed per part. Opens in edit mode after creation.")}
-          <div class="createFormField">
+        <div class="createForm createFormReadonly">
+          <input type="hidden" id="revisionSourcePart" value="${escapeHtml(partNumber)}">
+          <div class="createFormField createFormFieldName">
             <div class="createFormMeta">
-              <label class="createFormLabel" for="revisionSourcePart">Part</label>
-              <span class="createFormHint">Must reference an existing part</span>
+              <label class="createFormLabel" for="newRevisionName">Name</label>
             </div>
-            <select class="tableInput createFormInput" id="revisionSourcePart">${partOptions}</select>
+            <input class="tableInput createFormInput createFormNameInput" id="newRevisionName" value="${escapeHtml(name)}" readonly tabindex="-1" aria-readonly="true">
+          </div>
+          <div class="createFormField createFormFieldInline">
+            <div class="createFormInlinePair">
+              <div class="createFormField">
+                <div class="createFormMeta">
+                  <label class="createFormLabel" for="newRevisionPartNumber">Part Number</label>
+                </div>
+                <input class="tableInput createFormInput" id="newRevisionPartNumber" value="${escapeHtml(partNumber)}" readonly tabindex="-1" aria-readonly="true">
+              </div>
+              <div class="createFormField createFormFieldRevision">
+                <div class="createFormMeta">
+                  <label class="createFormLabel" for="newRevisionValue">Revision</label>
+                </div>
+                <input class="tableInput createFormInput" id="newRevisionValue" value="${escapeHtml(nextRevision)}" readonly tabindex="-1" aria-readonly="true">
+              </div>
+            </div>
           </div>
           <div class="createFormField">
             <div class="createFormMeta">
-              <label class="createFormLabel" for="newRevisionValue">New Revision</label>
-              <span class="createFormHint">Computed from the selected part revision</span>
+              <label class="createFormLabel" for="newRevisionProject">Project</label>
             </div>
-            <input class="tableInput createFormInput" id="newRevisionValue" value="${escapeHtml(nextRevisionForPart(selectedSource))}" readonly>
-          </div>
-          <label class="createCheckboxField">
-            <input type="checkbox" id="newRevisionMinor">
-            <span>Minor Revision</span>
-          </label>
-          <div class="createFormMeta createFormFullHint">
-            <span class="createFormHint">Major revisions advance A to B. Minor revisions advance A to A01.</span>
+            <input class="tableInput createFormInput createFormProjectInput" id="newRevisionProject" value="${escapeHtml(project)}" readonly tabindex="-1" aria-readonly="true">
           </div>
           <div class="createFormActions">
-            <button class="iconButton createActionBtn createCancelBtn" type="button" data-create-mode="hub">Cancel</button>
-            <button class="iconButton primaryAction createActionBtn createSaveBtn" type="button" data-submit-revision>Create</button>
+            <button class="createSubmitIcon" type="button" data-submit-revision title="Create" aria-label="Create"></button>
           </div>
         </div>
       </td>
@@ -2384,7 +2536,7 @@ function renderCreateProjectRows() {
               <label class="createFormLabel" for="newProjectOwner">Owner</label>
               <span class="createFormHint">Default engineering owner email</span>
             </div>
-            <input class="tableInput createFormInput" id="newProjectOwner" value="${escapeHtml(localStorage.getItem("peakDefaultOwner") || "engineering@example.com")}">
+            <input class="tableInput createFormInput" id="newProjectOwner" value="${escapeHtml(currentEditorName() || "")}">
           </div>
           <div class="createFormField">
             <div class="createFormMeta">
@@ -2646,74 +2798,157 @@ function partEditorSelectRow(label, field, value, options, notes) {
   `;
 }
 
-function renderSettingsRows() {
-  const productDataFolderDisplay = productDataFolderName || "";
-  const tabBar = `
-    <tr class="settingsTabRow">
-      <td colspan="10">
-        <div class="settingsTabs">
-          <button class="settingsTab${activeSettingsTab === "setup" ? " active" : ""}" type="button" data-settings-tab="setup">Setup</button>
-          <button class="settingsTab${activeSettingsTab === "appearance" ? " active" : ""}" type="button" data-settings-tab="appearance">Appearance</button>
-          <button class="settingsTab${activeSettingsTab === "preferences" ? " active" : ""}" type="button" data-settings-tab="preferences">Preferences</button>
-        </div>
-      </td>
-    </tr>
-  `;
-  if (activeSettingsTab === "setup") {
-    ensureGitHubAuthStatus();
-    tableHead.innerHTML = tabBar + `
-      <tr>
-        <th scope="col">Setting</th>
-        <th scope="col">Value</th>
-        <th scope="col">Notes</th>
-      </tr>
-    `;
-    partsList.innerHTML = `
-      <tr>
-        <td>Product Data Folder</td>
-        <td>
-          <div class="folderPicker">
-            <input class="tableInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderDisplay)}" placeholder="No folder selected" readonly>
-            <button class="iconButton formAction" type="button" data-select-product-folder title="Select product data folder" aria-label="Select product data folder" data-icon="folder"></button>
-          </div>
-        </td>
-        <td>Local Git folder containing manifest.json and parts/</td>
-      </tr>
-      <tr>
-        <td>Product Data Remote</td>
-        <td><input class="tableInput" id="settingsProductDataRemote" value="${escapeHtml(productDataRemote)}" placeholder="https://github.com/organization/Product-Data.git"></td>
-        <td>Required Git origin used for pull, push, and workflow operations</td>
-      </tr>
-      ${githubAuthSettingsRow()}
-      <tr>
-        <td colspan="3"><button class="iconButton primaryAction formAction" type="button" data-save-settings>Save Settings</button></td>
-      </tr>
-    `;
-  } else if (activeSettingsTab === "appearance") {
-    tableHead.innerHTML = tabBar;
-    renderAppearanceTabRows();
-  } else {
-    tableHead.innerHTML = tabBar + `
-      <tr>
-        <th scope="col">Setting</th>
-        <th scope="col">Value</th>
-        <th scope="col">Notes</th>
-      </tr>
-    `;
-    partsList.innerHTML = `
-      <tr>
-        <td>Default Owner</td>
-        <td><input class="tableInput" id="settingsDefaultOwner" value="${escapeHtml(localStorage.getItem("peakDefaultOwner") || "engineering@example.com")}"></td>
-        <td>Used for newly created parts and projects</td>
-      </tr>
-      <tr>
-        <td colspan="3"><button class="iconButton primaryAction formAction" type="button" data-save-preferences>Save Preferences</button></td>
-      </tr>
-    `;
-  }
+function getProfileName() {
+  return String(localStorage.getItem("peakProfileName") || "").trim();
 }
 
-function githubAuthSettingsRow() {
+function getProfileUsername() {
+  return String(localStorage.getItem("peakProfileUsername") || "").trim();
+}
+
+function isProfileComplete() {
+  return Boolean(getProfileName() && getProfileUsername());
+}
+
+function currentEditorName() {
+  return getProfileName() || getProfileUsername() || "";
+}
+
+function currentEditorLabel() {
+  const name = getProfileName();
+  const username = getProfileUsername();
+  if (name && username) return `${name} (@${username})`;
+  if (name || username) return name || username;
+  return "Profile incomplete";
+}
+
+function requireProfileForEdit(message = "Complete your profile in Settings before editing product data.") {
+  if (isProfileComplete()) return true;
+  statusMessage = message;
+  openSettingsModal("profile");
+  return false;
+}
+
+function productEditUserLabel() {
+  return `<p class="editingAsLabel">Editing as ${escapeHtml(currentEditorLabel())}</p>`;
+}
+
+function editingAsBanner() {
+  if (!activePartEditMode && !activeAttachmentEditMode && !activeAlternateEditMode) return "";
+  return productEditUserLabel();
+}
+
+function openSettingsModal(section = activeSettingsTab) {
+  activeSettingsTab = ["profile", "directory", "appearance"].includes(section) ? section : "profile";
+  settingsProfileFeedback = null;
+  if (!settingsModal || !settingsModalBody) return;
+  settingsModal.hidden = false;
+  renderSettingsModal();
+}
+
+function closeSettingsModal() {
+  if (settingsModal) settingsModal.hidden = true;
+}
+
+function refreshSettingsSurfaces() {
+  if (settingsModal && !settingsModal.hidden) renderSettingsModal();
+}
+
+function saveProfileFromForm() {
+  const name = document.querySelector("#settingsProfileName")?.value.trim() || "";
+  const username = document.querySelector("#settingsProfileUsername")?.value.trim() || "";
+  localStorage.setItem("peakProfileName", name);
+  localStorage.setItem("peakProfileUsername", username);
+  if (!name || !username) {
+    statusMessage = "Profile Name and Profile Username are required.";
+    settingsProfileFeedback = { tone: "warning", text: statusMessage };
+  } else {
+    statusMessage = `Profile saved as ${currentEditorLabel()}`;
+    settingsProfileFeedback = { tone: "success", text: statusMessage };
+  }
+  renderSettingsModal();
+  renderApp();
+}
+
+function renderSettingsModal() {
+  if (!settingsModalBody) return;
+  settingsModal?.querySelectorAll("[data-settings-section]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.settingsSection === activeSettingsTab);
+  });
+  if (activeSettingsTab === "directory") {
+    ensureGitHubAuthStatus();
+    settingsModalBody.innerHTML = renderSettingsDirectoryPanel();
+    return;
+  }
+  if (activeSettingsTab === "appearance") {
+    settingsModalBody.innerHTML = renderSettingsAppearancePanel();
+    return;
+  }
+  settingsModalBody.innerHTML = renderSettingsProfilePanel();
+}
+
+function renderSettingsProfilePanel() {
+  const incomplete = !isProfileComplete();
+  const feedback = settingsProfileFeedback
+    ? `<p class="settingsPanelNotice settingsPanelNotice-${settingsProfileFeedback.tone}" role="status">${escapeHtml(settingsProfileFeedback.text)}</p>`
+    : incomplete
+      ? `<p class="settingsPanelNotice" role="status">Profile Name and Profile Username are required.</p>`
+      : "";
+  return `
+    <div class="settingsPanel">
+      <header class="settingsPanelHeader">
+        <h3>Profile</h3>
+        <p>Required before creating or editing product data.</p>
+      </header>
+      ${feedback}
+      <div class="settingsField">
+        <label class="settingsFieldLabel" for="settingsProfileName">Profile Name <span class="requiredMark" aria-hidden="true">*</span></label>
+        <input class="settingsFieldInput" id="settingsProfileName" value="${escapeHtml(getProfileName())}" placeholder="Full name" autocomplete="name">
+      </div>
+      <div class="settingsField">
+        <label class="settingsFieldLabel" for="settingsProfileUsername">Profile Username <span class="requiredMark" aria-hidden="true">*</span></label>
+        <input class="settingsFieldInput" id="settingsProfileUsername" value="${escapeHtml(getProfileUsername())}" placeholder="username" autocomplete="username">
+      </div>
+      <div class="settingsPanelActions">
+        <button class="iconButton primaryAction formAction" type="button" data-save-profile>Save Profile</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsDirectoryPanel() {
+  const productDataFolderDisplay = productDataFolderName || "";
+  return `
+    <div class="settingsPanel">
+      <header class="settingsPanelHeader">
+        <h3>Directory</h3>
+        <p>Product data folder and remote configuration.</p>
+      </header>
+      <div class="settingsField">
+        <label class="settingsFieldLabel" for="settingsProductDataFolder">Product Data Folder</label>
+        <div class="folderPicker">
+          <input class="settingsFieldInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderDisplay)}" placeholder="No folder selected" readonly>
+          <button class="iconButton formAction" type="button" data-select-product-folder title="Select product data folder" aria-label="Select product data folder" data-icon="folder"></button>
+        </div>
+        <p class="settingsFieldHint">Local Git folder containing manifest.json and parts/</p>
+      </div>
+      <div class="settingsField">
+        <label class="settingsFieldLabel" for="settingsProductDataRemote">Product Data Remote</label>
+        <input class="settingsFieldInput" id="settingsProductDataRemote" value="${escapeHtml(productDataRemote)}" placeholder="https://github.com/organization/Product-Data.git">
+        <p class="settingsFieldHint">Required Git origin used for pull, push, and workflow operations</p>
+      </div>
+      <div class="settingsField">
+        <span class="settingsFieldLabel">GitHub Merge Requests</span>
+        ${githubAuthSettingsInline()}
+      </div>
+      <div class="settingsPanelActions">
+        <button class="iconButton primaryAction formAction" type="button" data-save-settings>Save Directory</button>
+      </div>
+    </div>
+  `;
+}
+
+function githubAuthSettingsInline() {
   const status = githubAuthStatus;
   const checking = githubAuthChecking && !status?.authenticated;
   const state = status?.authenticated ? "Connected" : checking ? "Checking..." : "Not connected";
@@ -2724,15 +2959,69 @@ function githubAuthSettingsRow() {
     ? `<button class="iconButton formAction" type="button" data-refresh-github-auth>Refresh</button>`
     : `<button class="iconButton primaryAction formAction" type="button" data-connect-github${checking ? " disabled" : ""}>${checking ? "Connecting..." : "Connect GitHub"}</button>`;
   return `
+    <div class="settingsActionCell">
+      <span class="settingsStatus ${status?.authenticated ? "success" : "warning"}">${escapeHtml(state)}</span>
+      ${button}
+    </div>
+    <p class="settingsFieldHint">${escapeHtml(detail)}</p>
+  `;
+}
+
+function renderSettingsAppearancePanel() {
+  return `
+    <div class="settingsPanel">
+      <header class="settingsPanelHeader">
+        <h3>Appearance</h3>
+        <p>General appearance preferences for this workstation.</p>
+      </header>
+      <div class="appearanceSection">
+        <div class="appearanceGroup">
+          <p class="appearanceLabel">Theme</p>
+          <div class="themeToggle">
+            <button class="themeButton${activeColorScheme === "light" ? " active" : ""}" type="button" data-theme-mode="light">
+              <span class="themeIcon sun" aria-hidden="true"></span>
+              Light
+            </button>
+            <button class="themeButton${activeColorScheme === "dark" ? " active" : ""}" type="button" data-theme-mode="dark">
+              <span class="themeIcon moon" aria-hidden="true"></span>
+              Dark
+            </button>
+          </div>
+        </div>
+        <div class="appearanceGroup">
+          <p class="appearanceLabel">Typography</p>
+          <div class="fontPrefRow">
+            <label>
+              Font
+              <select id="peakFontFamily" aria-label="Font family">
+                ${fontFamilyOptions.map((option) => `
+                  <option value="${escapeHtml(option.id)}"${activeFontFamily === option.id ? " selected" : ""}>${escapeHtml(option.label)}</option>
+                `).join("")}
+              </select>
+            </label>
+            <label>
+              Size
+              <input type="number" id="peakFontSize" min="10" max="24" step="1" value="${escapeHtml(activeFontSize)}" aria-label="Font size">
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsRows() {
+  // Legacy tab renderer replaced by settings popup.
+  tableHead.innerHTML = "";
+  partsList.innerHTML = `<tr><td class="emptyCell" colspan="6">Open Settings from the sidebar.</td></tr>`;
+}
+
+function githubAuthSettingsRow() {
+  return `
     <tr>
       <td>GitHub Merge Requests</td>
-      <td>
-        <div class="settingsActionCell">
-          <span class="settingsStatus ${status?.authenticated ? "success" : "warning"}">${escapeHtml(state)}</span>
-          ${button}
-        </div>
-      </td>
-      <td>${escapeHtml(detail)}</td>
+      <td>${githubAuthSettingsInline()}</td>
+      <td></td>
     </tr>
   `;
 }
@@ -2741,38 +3030,7 @@ function renderAppearanceTabRows() {
   partsList.innerHTML = `
     <tr>
       <td colspan="10" class="appearanceCell">
-        <div class="appearanceSection">
-          <div class="appearanceGroup">
-            <p class="appearanceLabel">Theme</p>
-            <div class="themeToggle">
-              <button class="themeButton${activeColorScheme === "light" ? " active" : ""}" type="button" data-theme-mode="light">
-                <span class="themeIcon sun" aria-hidden="true"></span>
-                Light
-              </button>
-              <button class="themeButton${activeColorScheme === "dark" ? " active" : ""}" type="button" data-theme-mode="dark">
-                <span class="themeIcon moon" aria-hidden="true"></span>
-                Dark
-              </button>
-            </div>
-          </div>
-          <div class="appearanceGroup">
-            <p class="appearanceLabel">Typography</p>
-            <div class="fontPrefRow">
-              <label>
-                Font
-                <select id="peakFontFamily" aria-label="Font family">
-                  ${fontFamilyOptions.map((option) => `
-                    <option value="${escapeHtml(option.id)}"${activeFontFamily === option.id ? " selected" : ""}>${escapeHtml(option.label)}</option>
-                  `).join("")}
-                </select>
-              </label>
-              <label>
-                Size
-                <input type="number" id="peakFontSize" min="10" max="24" step="1" value="${escapeHtml(activeFontSize)}" aria-label="Font size">
-              </label>
-            </div>
-          </div>
-        </div>
+        ${renderSettingsAppearancePanel()}
       </td>
     </tr>
   `;
@@ -2812,14 +3070,14 @@ function renderSearchDetail() {
 function renderOpenedPartDetail(rootPart, selectedPart) {
   const key = partKey(selectedPart);
   const isFavorite = favoritePartKeys.includes(key);
-  const panelOpen = partAsidePanel === "info" || partAsidePanel === "options";
+  const infoOpen = partAsidePanel === "info";
   const editing = activePartEditMode && isDraftRevision(selectedPart);
   const releasedLabel = mostRecentlyReleasedLabel(selectedPart);
   const driveUrl = documentUrl(selectedPart, "drive");
   const onshapeUrl = documentUrl(selectedPart, "onshape");
   const workUrl = documentUrl(selectedPart, "work");
   partDetail.innerHTML = `
-    <div class="partDetailLayout partDetailV2${panelOpen ? " panel-open" : ""}">
+    <div class="partDetailLayout partDetailV2${infoOpen ? " panel-open" : ""}">
       <div class="partDetailMain">
         <header class="partDetailToolbar">
           <div class="partDetailHeading">
@@ -2834,9 +3092,13 @@ function renderOpenedPartDetail(rootPart, selectedPart) {
             </div>
           </div>
           <div class="partDetailToolbarActions">
-            <button class="partToolBtn${partAsidePanel === "info" ? " active" : ""}" type="button" data-part-panel="info" title="Details" aria-label="Details" aria-pressed="${partAsidePanel === "info"}"></button>
+            ${editingAsBanner()}
+            <button class="partToolBtn${infoOpen ? " active" : ""}" type="button" data-part-panel="info" title="Details" aria-label="Details" aria-pressed="${infoOpen}"></button>
             <button class="partToolBtn partToolStar${isFavorite ? " active" : ""}" type="button" data-part-favorite="${escapeHtml(key)}" title="${isFavorite ? "Unfavorite" : "Favorite"}" aria-label="${isFavorite ? "Unfavorite" : "Favorite"}" aria-pressed="${isFavorite}"></button>
-            <button class="partToolBtn${partAsidePanel === "options" ? " active" : ""}" type="button" data-part-panel="options" title="Options" aria-label="Options" aria-pressed="${partAsidePanel === "options"}"></button>
+            <div class="partOptionsWrap">
+              <button class="partToolBtn${partOptionsMenuOpen ? " active" : ""}" type="button" data-part-options-toggle title="Options" aria-label="Options" aria-expanded="${partOptionsMenuOpen}" aria-haspopup="menu"></button>
+              ${partOptionsMenuOpen ? renderPartOptionsMenu(selectedPart) : ""}
+            </div>
           </div>
         </header>
         <div class="partDetailBody notionScroll" data-notion-scroll>
@@ -2847,7 +3109,9 @@ function renderOpenedPartDetail(rootPart, selectedPart) {
           <button class="notionScrollChevron down" type="button" data-scroll-dir="1" hidden aria-label="Scroll down"></button>
         </div>
       </div>
-      ${panelOpen ? renderPartAsidePanel(selectedPart) : ""}
+      <div class="partAsideSlot" aria-hidden="${infoOpen ? "false" : "true"}">
+        ${renderPartInfoPanel(selectedPart)}
+      </div>
     </div>
   `;
   requestAnimationFrame(refreshNotionScrolls);
@@ -2859,14 +3123,8 @@ function mostRecentlyReleasedLabel(part) {
   return `${released.part_number}^${released.revision || "A"}`;
 }
 
-function renderPartAsidePanel(part) {
-  if (partAsidePanel === "options") {
-    return renderPartOptionsPanel(part);
-  }
-  return renderPartInfoPanel(part);
-}
-
 function renderPartInfoPanel(part) {
+  const documents = attachmentsForPart(part);
   return `
     <aside class="partAsidePanel" aria-label="Part details">
       <header class="partAsideHeader">
@@ -2890,32 +3148,127 @@ function renderPartInfoPanel(part) {
           <span class="notionPropLabel">Last edited</span>
           <span class="notionPropValue">${escapeHtml(formatPartTimestamp(part.updated_at))}</span>
         </div>
+        <div class="notionDocsBlock">
+          <h4 class="notionDocsHeading">Documents</h4>
+          ${documents.length
+            ? `<ul class="notionDocsList">${documents.map((record) => `
+                <li class="notionDocItem">
+                  ${record.url
+                    ? `<a href="${escapeHtml(record.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(record.title || record.name || "Untitled")}">${escapeHtml(record.title || record.name || "Untitled")}</a>`
+                    : `<span title="${escapeHtml(record.title || record.name || "Untitled")}">${escapeHtml(record.title || record.name || "Untitled")}</span>`}
+                  <span class="notionDocType">${escapeHtml(attachmentTypeLabel(record))}</span>
+                </li>
+              `).join("")}</ul>`
+            : `<p class="notionDocsEmpty">No documents</p>`}
+        </div>
       </div>
     </aside>
   `;
 }
 
-function renderPartOptionsPanel(part) {
-  const driveUrl = documentUrl(part, "drive");
-  const onshapeUrl = documentUrl(part, "onshape");
-  const workUrl = documentUrl(part, "work");
+function renderPartOptionsMenu(part) {
   const canEdit = isDraftRevision(part);
+  const hasDraftRevision = draftRevisionsForPart(part.part_number).length > 0;
+  const maturityTransition = nextMaturityTransition(part);
+  const revisionTransition = nextRevisionTransition(part);
+  const maturityRule = maturityTransition ? maturityWorkflowRule(part, maturityTransition.to) : workflowRule([]);
+  const revisionRule = revisionTransition ? revisionWorkflowRule(part, revisionTransition.to) : workflowRule([]);
+
   return `
-    <aside class="partAsidePanel" aria-label="Part options">
-      <header class="partAsideHeader">
-        <h3>Options</h3>
-        <button class="partAsideClose" type="button" data-part-panel-close aria-label="Close">×</button>
-      </header>
-      <div class="partOptionsList">
-        <button class="partOptionItem" type="button" data-part-action="open-drive"${driveUrl ? "" : " disabled"}>Open Google Drive</button>
-        <button class="partOptionItem" type="button" data-part-action="open-onshape"${onshapeUrl ? "" : " disabled"}>Open CAD</button>
-        <button class="partOptionItem" type="button" data-part-action="open-work"${workUrl ? "" : " disabled"}>Open WI</button>
-        <button class="partOptionItem" type="button" data-part-action="edit-part"${canEdit ? "" : " disabled"}${activePartEditMode ? " aria-current=\"true\"" : ""}>Edit Part</button>
-        <button class="partOptionItem" type="button" data-part-action="edit-attachments"${activeAttachmentEditMode ? " aria-current=\"true\"" : ""}>Edit Attachments</button>
-        <button class="partOptionItem" type="button" data-part-action="copy-part-id">Copy Part ID</button>
+    <div class="partOptionsMenu" role="menu" aria-label="Part options">
+      <div class="partOptionsMenuBody">
+        ${partOptionItem("Copy Item ID", "copy-item-id", { icon: "copy-id" })}
+        ${partOptionItem("Copy Item Contents", "copy-item-contents", { icon: "copy" })}
+        <div class="partOptionsDivider" role="separator"></div>
+        ${partOptionItem("Edit Item", "edit-part", { icon: "edit", disabled: !canEdit, active: activePartEditMode })}
+        ${partOptionItem("Edit Attachments", "edit-attachments", { icon: "attachments", active: activeAttachmentEditMode })}
+        ${partOptionItem("Edit Alternates", "edit-alternates", { icon: "alternates", active: activeAlternateEditMode })}
+        <div class="partOptionsDivider" role="separator"></div>
+        ${partOptionItem("Create Revision", "create-revision", { icon: "revision", disabled: hasDraftRevision, title: hasDraftRevision ? "A draft revision already exists for this item" : "" })}
+        ${partOptionItem("Create Item Based On", "create-from-source", { icon: "revision" })}
+        ${partOptionItem("Create Alternate Item", "create-alternate", { icon: "revision" })}
+        <div class="partOptionsDivider" role="separator"></div>
+        ${workflowMenuAction(maturityTransition, maturityRule, "Transition Item Maturity", "maturity", part, { alwaysShow: true, icon: "status" })}
+        ${workflowMenuAction(revisionTransition, revisionRule, "Transition Revision Status", "revision", part, { alwaysShow: true, icon: "arrow-up" })}
+        ${workflowFeedbackMessage("maturity", part)}
+        ${workflowFeedbackMessage("revision", part)}
+        ${activePartEditMode ? `
+          <div class="partOptionsDivider" role="separator"></div>
+          ${partOptionItem("Save Part", "save-part", { icon: "save" })}
+          ${partOptionItem("Cancel Changes", "cancel-part-edit", { icon: "cancel" })}
+        ` : ""}
       </div>
-    </aside>
+    </div>
   `;
+}
+
+function partOptionItem(label, action, { icon = "", disabled = false, active = false, title = "" } = {}) {
+  return `<button class="partOptionItem${active ? " is-active" : ""}" type="button" role="menuitem" data-part-action="${escapeHtml(action)}" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}"${disabled ? " disabled" : ""}${active ? " aria-current=\"true\"" : ""}${title ? ` title="${escapeHtml(title)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(label)}</span></button>`;
+}
+
+function workflowMenuAction(transition, rule, label, workflow, part, { danger = false, alwaysShow = false, icon = "" } = {}) {
+  if (!transition && !alwaysShow) return "";
+  const feedback = workflowFeedbackFor(workflow, part);
+  const isRunning = feedback?.state === "running";
+  const enabled = Boolean(transition) && Boolean(rule?.ready) && !isRunning;
+  const to = transition?.to || "";
+  const display = isRunning ? "Working..." : label;
+  return `<button class="partOptionItem${danger ? " danger" : ""}" type="button" role="menuitem" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(to)}"${enabled ? "" : " disabled"}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(display)}</span></button>`;
+}
+
+function filterPartOptionsMenu(query = partOptionsSearchQuery) {
+  const menu = document.querySelector(".partOptionsMenu");
+  if (!menu) return;
+  const body = menu.querySelector(".partOptionsMenuBody");
+  if (!body) return;
+  const q = String(query || "").trim().toLowerCase();
+  const items = [...body.querySelectorAll(".partOptionItem")];
+  items.forEach((item) => {
+    const label = String(item.dataset.optionLabel || item.textContent || "").toLowerCase();
+    item.hidden = Boolean(q) && !label.includes(q);
+  });
+  body.querySelectorAll(".partOptionsDivider").forEach((divider) => {
+    let hasBefore = false;
+    let hasAfter = false;
+    let el = divider.previousElementSibling;
+    while (el) {
+      if (el.classList.contains("partOptionsDivider")) break;
+      if (el.classList.contains("partOptionItem") && !el.hidden) {
+        hasBefore = true;
+        break;
+      }
+      el = el.previousElementSibling;
+    }
+    el = divider.nextElementSibling;
+    while (el) {
+      if (el.classList.contains("partOptionsDivider")) break;
+      if (el.classList.contains("partOptionItem") && !el.hidden) {
+        hasAfter = true;
+        break;
+      }
+      el = el.nextElementSibling;
+    }
+    divider.hidden = !(hasBefore && hasAfter);
+  });
+  const anyVisible = items.some((item) => !item.hidden);
+  let empty = body.querySelector(".partOptionsEmpty");
+  if (!anyVisible) {
+    if (!empty) {
+      empty = document.createElement("p");
+      empty.className = "partOptionsEmpty";
+      empty.textContent = "No matching actions";
+      body.insertBefore(empty, body.firstChild);
+    }
+  } else {
+    empty?.remove();
+  }
+}
+
+function focusPartOptionsSearch() {
+  // Search field removed; keep first enabled action ready for keyboard use.
+  requestAnimationFrame(() => {
+    document.querySelector(".partOptionsMenuBody .partOptionItem:not([hidden]):not(:disabled)")?.focus();
+  });
 }
 
 function formatPartTimestamp(value) {
@@ -2936,6 +3289,9 @@ function renderCombinedPartDetails(part) {
   if (activeAttachmentEditMode) {
     return renderEditableAttachmentsTab(part);
   }
+  if (activeAlternateEditMode) {
+    return renderEditableAlternates(part);
+  }
   const editing = activePartEditMode && isDraftRevision(part);
   const legacyPartNumber = legacyPartNumberValue(part);
   const propertyRows = [
@@ -2943,8 +3299,6 @@ function renderCombinedPartDetails(part) {
     editing ? propertyEditInline("Revision Description", "change_summary", part.change_summary || "", { textarea: true }) : property("Revision Description", part.change_summary || "Not set"),
     property("Project", part.project || "Unassigned"),
     editing ? propertyEditSelectInline("Traceability", "traceability", traceabilityValue(part), traceabilityOptions()) : property("Traceability", traceabilityLabel(part)),
-    property("Part Maturity", maturityStageLabel(part)),
-    property("Release Status", releaseStatusLabel(part)),
     editing ? propertyEditInline("Legacy Number", "legacy_part_number", legacyPartNumber) : property("Legacy Number", legacyPartNumber || "Not set"),
     editing ? propertyEditInline("Cost", "cost", optionalPartPropertyValue(part, "cost")) : property("Cost", optionalPartPropertyValue(part, "cost") || "Not set"),
     editing ? propertyEditInline("Mass", "mass", optionalPartPropertyValue(part, "mass")) : property("Mass", optionalPartPropertyValue(part, "mass") || "Not set"),
@@ -2960,21 +3314,14 @@ function renderCombinedPartDetails(part) {
   return `
     <div class="partCombinedLayout">
       ${detailSection("", propertyRows)}
-      ${editing ? `
-        <div class="partEditActions">
-          <button class="iconButton primaryAction formAction" type="button" data-save-open-part="${escapeHtml(partKey(part))}">Save Part</button>
-          <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
-        </div>
-      ` : ""}
-      ${renderAttachmentSections(part)}
-      ${renderWhereUsedHistory(part)}
       ${renderRevisionHistory(part)}
-      ${renderMaturityProgress(part)}
+      ${renderApprovedAlternates(part)}
+      ${renderWhereUsedHistory(part)}
       ${renderInlineWorkflow(part)}
       ${(() => {
         const activityItems = activityHistoryForPart(part);
         return `
-          <section class="propertySection">
+          <section class="propertySection sectionLabeled">
             <h3>Activity</h3>
             ${activityItems.length ? renderActivityHistory(activityItems) : `<p class="empty">No activity recorded for this part.</p>`}
           </section>
@@ -2985,55 +3332,15 @@ function renderCombinedPartDetails(part) {
 }
 
 function renderInlineWorkflow(part) {
-  const maturityTransition = nextMaturityTransition(part);
-  const revisionTransition = nextRevisionTransition(part);
-  const revertTransition = revisionStatusValue(part) === "release_candidate" ? { to: "draft", mode: "direct", action: "revert" } : null;
-  const deleteTransition = isDraftRevision(part) ? { to: "delete", mode: "direct", action: "delete" } : null;
-  const maturityRule = maturityWorkflowRule(part, maturityTransition?.to);
-  const revisionRule = revisionWorkflowRule(part, revisionTransition?.to);
-  const revertRule = revertTransition ? revisionWorkflowRule(part, "draft") : workflowRule([]);
-  const deleteRule = deleteTransition ? revisionWorkflowRule(part, "delete") : workflowRule([]);
   return `
-    <section class="propertySection workflowSection">
-      <h3>Product Maturity</h3>
-      ${workflowTimeline(maturityWorkflowStates, maturityStageValue(part), maturityStageText)}
-      <dl class="propertyGrid workflowGrid">
-        ${property("Current", maturityStageLabel(part))}
-        ${property("Next", maturityTransition ? maturityStageText(maturityTransition.to) : "No transition available")}
-      </dl>
-      ${workflowCriteriaList(maturityRule, { jumpable: true })}
-      ${workflowActionButton(maturityTransition, maturityRule, `Transition to ${maturityTransition ? maturityStageText(maturityTransition.to) : ""}`, "maturity", part)}
+    <section class="propertySection workflowSection sectionLabeled">
+      <h3>Part Maturity</h3>
+      ${workflowPillTrack(maturityWorkflowStates, maturityStageValue(part), maturityStageText)}
       ${workflowFeedbackMessage("maturity", part)}
     </section>
-    <section class="propertySection workflowSection">
-      <h3>Revision Status</h3>
-      ${workflowTimeline(revisionWorkflowStates, revisionStatusValue(part), revisionStatusText)}
-      <dl class="propertyGrid workflowGrid">
-        ${property("Current", releaseStatusLabel(part))}
-        ${property("Next", revisionTransition ? revisionStatusText(revisionTransition.to) : "No transition available")}
-      </dl>
-      ${workflowCriteriaList(revisionRule, { jumpable: true })}
-      ${workflowActionButtons([
-        {
-          transition: revisionTransition,
-          rule: revisionRule,
-          label: revisionTransition?.to === "release_candidate" ? "Set Release Candidate" : `Transition to ${revisionTransition ? revisionStatusText(revisionTransition.to) : ""}`,
-          workflow: "revision"
-        },
-        {
-          transition: revertTransition,
-          rule: revertRule,
-          label: "Revert to Draft",
-          workflow: "revision"
-        },
-        {
-          transition: deleteTransition,
-          rule: deleteRule,
-          label: "Delete Draft Revision",
-          workflow: "revision",
-          danger: true
-        }
-      ], part)}
+    <section class="propertySection workflowSection sectionLabeled">
+      <h3>Release Status</h3>
+      ${workflowPillTrack(revisionWorkflowStates, revisionStatusValue(part), revisionStatusText)}
       ${workflowFeedbackMessage("revision", part)}
     </section>
   `;
@@ -3196,12 +3503,6 @@ function renderOverviewTab(part) {
           property("Part Maturity", maturityStageLabel(part)),
           propertyEditInline("Approvers", "approvers", (part.approvers ?? []).map((approver) => approver.name || approver).join(", "))
         ]) : ""}
-        ${editing ? `
-          <div class="partEditActions">
-            <button class="iconButton primaryAction formAction" type="button" data-save-open-part="${escapeHtml(partKey(part))}">Save Part</button>
-            <button class="iconButton formAction" type="button" data-cancel-part-edit>Cancel</button>
-          </div>
-        ` : ""}
       </div>
       <div class="overviewColumn">
         ${renderMaturityProgress(part)}
@@ -3251,21 +3552,23 @@ function renderHistoryTab(part) {
 function renderActivityHistory(items) {
   const sorted = [...items].sort((a, b) => String(b.performed_at || "").localeCompare(String(a.performed_at || "")));
   return `
-    <div class="activityList">
+    <ol class="activityCommitList">
       ${sorted.map((item) => `
-        <article class="activityItem">
-          <div class="activityMarker" aria-hidden="true"></div>
-          <div class="activityBody">
-            <div class="activityHeader">
-              <strong>${escapeHtml(activityActionLabel(item.action))}</strong>
-              <span>${escapeHtml(formatActivityTimestamp(item.performed_at))}</span>
-            </div>
-            <p>${escapeHtml(item.detail || activityDefaultDetail(item))}</p>
-            <small>${escapeHtml(item.actor || "Unknown user")}</small>
+        <li class="activityCommitItem">
+          <div class="activityCommitRail" aria-hidden="true">
+            <span class="activityCommitDot"></span>
           </div>
-        </article>
+          <div class="activityCommitBody">
+            <p class="activityCommitMessage">${escapeHtml(item.detail || activityDefaultDetail(item))}</p>
+            <p class="activityCommitMeta">
+              <span class="activityCommitActor">${escapeHtml(item.actor || "Unknown user")}</span>
+              <span class="activityCommitAction">${escapeHtml(activityActionLabel(item.action))}</span>
+              <time class="activityCommitTime" datetime="${escapeHtml(item.performed_at || "")}">${escapeHtml(formatActivityTimestamp(item.performed_at))}</time>
+            </p>
+          </div>
+        </li>
       `).join("")}
-    </div>
+    </ol>
   `;
 }
 
@@ -3377,6 +3680,20 @@ function workflowTimeline(states, current, labeler) {
     return [step, connector];
   });
   return `<div class="maturityTimeline workflowTimeline">${items.join("")}<div class="timelineArrow" aria-hidden="true"></div></div>`;
+}
+
+function workflowPillTrack(states, current, labeler) {
+  const activeIndex = Math.max(0, states.indexOf(current));
+  const items = states.flatMap((state, index) => {
+    const isComplete = index <= activeIndex;
+    const isActive = index === activeIndex;
+    const cls = `workflowPill${isComplete ? " complete" : ""}${isActive ? " active" : ""}`;
+    const pill = `<span class="${cls}" role="listitem">${escapeHtml(labeler(state))}</span>`;
+    if (index >= states.length - 1) return [pill];
+    const chevronComplete = index < activeIndex ? " complete" : "";
+    return [pill, `<span class="workflowPillChevron${chevronComplete}" aria-hidden="true"></span>`];
+  });
+  return `<div class="workflowPillTrack" role="list" aria-label="Workflow status">${items.join("")}</div>`;
 }
 
 function workflowActionButton(transition, rule, label, workflow, part) {
@@ -3581,27 +3898,34 @@ function attachmentsForPart(part) {
 }
 
 function renderAttachmentSections(part, { editable = false } = {}) {
-  const groups = groupedAttachments(part);
-  if (!groups.length) {
-    return `
-      <section class="propertySection attachmentTypeSection">
-        <h3>Attachments</h3>
-        <p class="description">No attachments linked.</p>
-      </section>
-    `;
-  }
-  return groups
-    .map(
-      ([type, records]) => `
-        <section class="propertySection attachmentTypeSection">
-          <h3>${escapeHtml(type)}</h3>
-          <div class="referenceList">
-            ${records.map((record) => fileReference(record, { editable })).join("")}
-          </div>
+  if (editable) {
+    const groups = groupedAttachments(part);
+    if (!groups.length) {
+      return `
+        <section class="propertySection attachmentTypeSection sectionLabeled">
+          <h3>Documents</h3>
+          <p class="description">No attachments linked.</p>
         </section>
-      `
-    )
-    .join("");
+      `;
+    }
+    return groups
+      .map(
+        ([type, records]) => `
+          <section class="propertySection attachmentTypeSection sectionLabeled">
+            <h3>${escapeHtml(type)}</h3>
+            <div class="referenceList">
+              ${records.map((record) => fileReference(record, { editable: true })).join("")}
+            </div>
+          </section>
+        `
+      )
+      .join("");
+  }
+  return "";
+}
+
+function renderDocumentsTable(part) {
+  return "";
 }
 
 function groupedAttachments(part) {
@@ -3840,10 +4164,6 @@ function revisionStatusRank(state) {
 function priorRevisionsAtLeast(part, target) {
   const targetRank = revisionStatusRank(target);
   return previousRevisionsForPart(part).every((revisionPart) => revisionStatusRank(revisionStatusValue(revisionPart)) >= targetRank);
-}
-
-function currentEditorName() {
-  return localStorage.getItem("peakDefaultOwner") || "engineering@example.com";
 }
 
 function maturityStageLabel(part) {
@@ -4097,7 +4417,7 @@ function renderMaturityProgress(part) {
 
 function renderRevisionHistory(part) {
   return `
-    <section class="propertySection">
+    <section class="propertySection sectionLabeled">
       <h3>Revision History</h3>
       <div class="detailTableWrap">
         <table class="detailTable revisionHistoryTable">
@@ -4122,30 +4442,254 @@ function renderRevisionHistory(part) {
 
 function renderWhereUsedHistory(part) {
   const rows = whereUsedRows(part);
+  if (!rows.length) return "";
   return `
-    <section class="propertySection">
+    <section class="propertySection sectionLabeled">
       <h3>Where Used</h3>
-      ${rows.length ? `
-        <div class="detailTableWrap">
-          <table class="detailTable revisionHistoryTable">
-            <thead>
-              <tr>
-                <th scope="col">Object</th>
-                <th scope="col">Status</th>
-                <th scope="col">Updated By</th>
-                <th scope="col">Updated</th>
-                <th scope="col">Created By</th>
-                <th scope="col">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${rows.map(whereUsedRow).join("")}
-            </tbody>
-          </table>
-        </div>
-      ` : `<p class="empty">Not used in any BOM.</p>`}
+      <div class="detailTableWrap">
+        <table class="detailTable revisionHistoryTable">
+          <thead>
+            <tr>
+              <th scope="col">Object</th>
+              <th scope="col">Status</th>
+              <th scope="col">Updated By</th>
+              <th scope="col">Updated</th>
+              <th scope="col">Created By</th>
+              <th scope="col">Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(whereUsedRow).join("")}
+          </tbody>
+        </table>
+      </div>
     </section>
   `;
+}
+
+function normalizeAlternateList(value) {
+  const seen = new Set();
+  const list = [];
+  asArray(value).forEach((entry) => {
+    const partNumber = canonicalPartNumber(
+      typeof entry === "string"
+        ? String(entry).split("^")[0]
+        : entry?.part_number || entry?.partNumber || ""
+    );
+    if (!partNumber || seen.has(partNumber)) return;
+    seen.add(partNumber);
+    list.push(partNumber);
+  });
+  return list;
+}
+
+function alternatesForPart(part) {
+  if (!part) return [];
+  const own = normalizeAlternateList(part.alternates || part.part_properties?.alternates);
+  const partNumber = canonicalPartNumber(part.part_number);
+  return own.filter((candidate) => candidate !== partNumber);
+}
+
+function setAlternatesForPartNumber(partNumber, alternates) {
+  const normalizedNumber = canonicalPartNumber(partNumber);
+  const next = normalizeAlternateList(alternates).filter((candidate) => candidate !== normalizedNumber);
+  parts.forEach((candidate) => {
+    if (canonicalPartNumber(candidate.part_number) !== normalizedNumber) return;
+    candidate.alternates = [...next];
+    candidate.part_properties = {
+      ...(candidate.part_properties || {}),
+      alternates: [...next]
+    };
+  });
+}
+
+function linkPartsAsAlternates(partA, partB) {
+  if (!partA || !partB) return false;
+  const aNumber = canonicalPartNumber(partA.part_number);
+  const bNumber = canonicalPartNumber(partB.part_number);
+  if (!aNumber || !bNumber || aNumber === bNumber) return false;
+  const aAlts = new Set(alternatesForPart(partA));
+  const bAlts = new Set(alternatesForPart(partB));
+  aAlts.add(bNumber);
+  bAlts.add(aNumber);
+  setAlternatesForPartNumber(aNumber, [...aAlts]);
+  setAlternatesForPartNumber(bNumber, [...bAlts]);
+  return true;
+}
+
+function alternatePartsFor(part) {
+  return alternatesForPart(part)
+    .map((partNumber) => latestRevisionForPart(partNumber) || findPartByKey(partNumber))
+    .filter(Boolean);
+}
+
+function renderApprovedAlternates(part) {
+  const rows = alternatePartsFor(part);
+  if (!rows.length) return "";
+  return `
+    <section class="propertySection sectionLabeled">
+      <h3>Approved Alternates</h3>
+      <div class="detailTableWrap">
+        <table class="detailTable revisionHistoryTable">
+          <thead>
+            <tr>
+              <th scope="col">Object</th>
+              <th scope="col">Name</th>
+              <th scope="col">Status</th>
+              <th scope="col">Project</th>
+              <th scope="col">Updated By</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(approvedAlternateRow).join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function approvedAlternateRow(alternate) {
+  const objectLabel = partObjectLabel(alternate);
+  return `
+    <tr>
+      <td><button class="linkButton" type="button" data-part-number="${escapeHtml(partKey(alternate))}">${escapeHtml(objectLabel)}</button></td>
+      <td>${escapeHtml(alternate.name || "Untitled")}</td>
+      <td>${escapeHtml(releaseStatusLabel(alternate))}</td>
+      <td>${escapeHtml(alternate.project || "Unassigned")}</td>
+      <td>${escapeHtml(updatedBy(alternate))}</td>
+      <td>${escapeHtml(alternate.updated_at || "Not set")}</td>
+    </tr>
+  `;
+}
+
+function renderEditableAlternates(part) {
+  const rows = alternatePartsFor(part);
+  return `
+    <div class="alternateEditLayout">
+      <header class="alternateEditHeader">
+        <div>
+          <h3>Edit Alternates</h3>
+          <p>Manage approved substitutes for ${escapeHtml(partObjectLabel(part))}.</p>
+        </div>
+        <div class="alternateEditActions">
+          <button class="iconButton formAction" type="button" data-add-alternate-picker title="Add alternate">Add Alternate</button>
+          <button class="iconButton formAction" type="button" data-cancel-alternate-edit>Done</button>
+        </div>
+      </header>
+      <div class="detailTableWrap">
+        <table class="detailTable revisionHistoryTable">
+          <thead>
+            <tr>
+              <th scope="col">Object</th>
+              <th scope="col">Name</th>
+              <th scope="col">Status</th>
+              <th scope="col">Project</th>
+              <th scope="col"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.length
+              ? rows.map((alternate) => `
+                <tr>
+                  <td><button class="linkButton" type="button" data-part-number="${escapeHtml(partKey(alternate))}">${escapeHtml(partObjectLabel(alternate))}</button></td>
+                  <td>${escapeHtml(alternate.name || "Untitled")}</td>
+                  <td>${escapeHtml(releaseStatusLabel(alternate))}</td>
+                  <td>${escapeHtml(alternate.project || "Unassigned")}</td>
+                  <td class="alternateEditRemoveCell">
+                    <button class="iconButton formAction" type="button" data-remove-alternate="${escapeHtml(alternate.part_number)}" title="Remove alternate">Remove</button>
+                  </td>
+                </tr>
+              `).join("")
+              : `<tr><td class="emptyCell" colspan="5">No alternates assigned yet</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function unlinkPartsAsAlternates(partA, partB) {
+  if (!partA || !partB) return false;
+  const aNumber = canonicalPartNumber(partA.part_number);
+  const bNumber = canonicalPartNumber(partB.part_number);
+  if (!aNumber || !bNumber || aNumber === bNumber) return false;
+  setAlternatesForPartNumber(aNumber, alternatesForPart(partA).filter((value) => value !== bNumber));
+  setAlternatesForPartNumber(bNumber, alternatesForPart(partB).filter((value) => value !== aNumber));
+  return true;
+}
+
+function openAlternateModal(part) {
+  if (!requireProfileForEdit()) return;
+  if (!alternateModal || !part) return;
+  alternateSourceKey = partKey(part);
+  alternateModal.hidden = false;
+  if (alternateSearchInput) {
+    alternateSearchInput.value = "";
+    alternateSearchInput.focus();
+  }
+  renderAlternateModalResults();
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function closeAlternateModal() {
+  if (alternateModal) alternateModal.hidden = true;
+  alternateSourceKey = null;
+  if (alternateSearchInput) alternateSearchInput.value = "";
+  if (alternateModalList) alternateModalList.innerHTML = "";
+}
+
+function renderAlternateModalResults() {
+  if (!alternateModalList) return;
+  const source = findPartByKey(alternateSourceKey);
+  if (!source) {
+    alternateModalList.innerHTML = `<p class="sidebarEmpty">No source part selected</p>`;
+    return;
+  }
+  const query = alternateSearchInput?.value.trim() || "";
+  const existing = new Set(alternatesForPart(source));
+  const sourceNumber = canonicalPartNumber(source.part_number);
+  const groups = groupedPartResults(parts)
+    .filter((group) => {
+      const part = group.representative;
+      const partNumber = canonicalPartNumber(part.part_number);
+      if (!partNumber || partNumber === sourceNumber) return false;
+      if (existing.has(partNumber)) return false;
+      if (!query) return true;
+      return matchesSearch(part, query);
+    })
+    .slice(0, 80);
+  alternateModalList.innerHTML = groups.length
+    ? groups.map((group) => {
+      const part = group.representative;
+      return `
+        <button class="searchResultItem" type="button" data-assign-alternate="${escapeHtml(partKey(part))}">
+          <strong>${escapeHtml(part.part_number)}^${escapeHtml(part.revision || "A")}</strong>
+          <span>${escapeHtml(part.name)} · ${escapeHtml(part.project || "Unassigned")}</span>
+        </button>
+      `;
+    }).join("")
+    : `<p class="sidebarEmpty">${query ? "No matching parts" : "No available parts to assign"}</p>`;
+  requestAnimationFrame(refreshNotionScrolls);
+}
+
+function assignAlternateFromPicker(targetKey) {
+  if (!requireProfileForEdit()) return;
+  const source = findPartByKey(alternateSourceKey);
+  const target = findPartByKey(targetKey);
+  if (!source || !target) {
+    statusMessage = "Could not assign alternate";
+    return;
+  }
+  if (!linkPartsAsAlternates(source, target)) {
+    statusMessage = "Could not assign alternate";
+    return;
+  }
+  persistLocalChanges();
+  statusMessage = `Linked ${partObjectLabel(source)} and ${partObjectLabel(target)} as approved alternates`;
+  closeAlternateModal();
+  renderApp();
 }
 
 function whereUsedRows(part) {
@@ -4335,7 +4879,7 @@ function bomItemUsesPart(item, part) {
 }
 
 function resolveBomChild(item) {
-  if (!item) {
+  if (!item || isBlankBomItem(item)) {
     return undefined;
   }
   if (item.child_object_id) {
@@ -4345,6 +4889,24 @@ function resolveBomChild(item) {
     return findPartByKey(`${item.child_part_number}^${item.child_revision}`);
   }
   return latestRevisionForPart(item.child_part_number) || findPartByKey(item.child_part_number);
+}
+
+function isBlankBomItem(item) {
+  return Boolean(item) && String(item.child_object_id || "").startsWith("blank:");
+}
+
+function createBlankBomItem() {
+  return {
+    child_object_id: `blank:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    child_part_number: "",
+    child_revision: "",
+    quantity: 1,
+    unit: "each"
+  };
+}
+
+function bomItemsForPersist(bom) {
+  return asArray(bom).filter((item) => !isBlankBomItem(item));
 }
 
 function countBy(records, key) {
@@ -4370,25 +4932,16 @@ function renderNavigationTree() {
     navigationTree.innerHTML = `
       <div class="treeGroup">
         <p>Create</p>
-        <button class="treeNode${activeCreateMode === "hub" ? " active" : ""}" type="button" data-create-mode="hub">Options</button>
         <button class="treeNode${activeCreateMode === "new" ? " active" : ""}" type="button" data-create-mode="new">New Part</button>
         <button class="treeNode${activeCreateMode === "source" ? " active" : ""}" type="button" data-create-mode="source">From Source</button>
         <button class="treeNode${activeCreateMode === "revision" ? " active" : ""}" type="button" data-create-mode="revision">New Revision</button>
-        <button class="treeNode${activeCreateMode === "project" ? " active" : ""}" type="button" data-create-mode="project">New Project</button>
       </div>
     `;
     return;
   }
 
   if (activeNavMode === "settings") {
-    navigationTree.innerHTML = `
-      <div class="treeGroup">
-        <p>Settings</p>
-        <button class="treeNode${activeSettingsTab === "setup" ? " active" : ""}" type="button" data-settings-tab="setup">Setup</button>
-        <button class="treeNode${activeSettingsTab === "appearance" ? " active" : ""}" type="button" data-settings-tab="appearance">Appearance</button>
-        <button class="treeNode${activeSettingsTab === "preferences" ? " active" : ""}" type="button" data-settings-tab="preferences">Preferences</button>
-      </div>
-    `;
+    navigationTree.innerHTML = `<div class="treeEmpty">Use Settings in the sidebar.</div>`;
     return;
   }
 
@@ -4455,8 +5008,8 @@ function renderBomTree() {
       <button class="treeNode bomNode root${selectedBomPartNumber === partKey(rootPart) ? " active" : ""}" type="button" data-bom-part-number="${escapeHtml(partKey(rootPart))}" role="row">
         ${renderBomRowCells({ type: "root", part: rootPart })}
       </button>
-      ${activePartEditMode && activeBomAddParent === partKey(rootPart) ? renderBomAddRow(rootPart) : ""}
-      ${childRows || '<div class="treeEmpty">No child components</div>'}
+      ${childRows || (!activePartEditMode ? '<div class="treeEmpty">No child components</div>' : "")}
+      ${activePartEditMode ? renderBomNewRow() : ""}
     </div>
   `;
 }
@@ -4474,98 +5027,63 @@ function renderBomHeader() {
 
 function renderBomRowCells({ type, part, item, child, childId, toggle = "", editable = false }) {
   return activeBomColumnOrder.map((key) => {
-    if (type === "add") {
-      if (key === "item") {
-        return `<div class="bomPartPicker"><input class="tableInput bomAddPartInput" data-bom-add-field="part" placeholder="Search part number or name" autocomplete="off" aria-label="Search for a component" aria-controls="bomPartSuggestions" aria-expanded="false"><div id="bomPartSuggestions" class="bomPartSuggestions" role="listbox" hidden></div></div>`;
-      }
-      if (key === "name") return '<span class="bomName" data-bom-add-preview="name">New component</span>';
-      if (key === "quantity") return '<input class="tableInput bomQtyInput" data-bom-add-field="quantity" type="number" min="0.001" step="any" value="1" aria-label="Component quantity">';
-      if (key === "revision") return '<span class="bomRevision" data-bom-add-preview="revision">—</span>';
-      return '<span class="bomStatus" data-bom-add-preview="status">—</span>';
-    }
-
     if (key === "item") {
       if (type === "root") return `<span class="bomItem bomItemCell">${escapeHtml(part.part_number)}</span>`;
+      if (editable) {
+        const blank = isBlankBomItem(item);
+        const label = blank
+          ? "Select item"
+          : (child?.part_number || item?.child_part_number || "Select item");
+        const dragHandle = blank
+          ? ""
+          : `<span class="bomDragHandle" draggable="true" data-bom-drag="${escapeHtml(childId)}" title="Drag to reorder" aria-label="Drag to reorder"></span>`;
+        return `
+          <div class="bomItem bomItemCell">
+            ${dragHandle}
+            ${toggle}
+            <button class="bomItemSelectBtn${blank ? " is-placeholder" : ""}" type="button" data-filter-picker="bomItem" data-bom-pick-item="${escapeHtml(childId)}" aria-haspopup="listbox" aria-expanded="false" title="Select item">
+              ${escapeHtml(label)}
+            </button>
+          </div>
+        `;
+      }
       return `<div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child?.part_number || item.child_part_number)}</button></div>`;
     }
-    if (key === "name") return `<span class="bomName">${escapeHtml(part?.name || child?.name || "External component")}</span>`;
+    if (key === "name") {
+      if (isBlankBomItem(item)) return '<span class="bomName bomPlaceholder">—</span>';
+      return `<span class="bomName">${escapeHtml(part?.name || child?.name || "External component")}</span>`;
+    }
     if (key === "quantity") {
       if (type === "root") return '<span class="bomQty">1</span>';
       return editable
         ? `<input class="tableInput bomQtyInput" value="${escapeHtml(item.quantity)}" data-bom-qty="${escapeHtml(childId)}">`
         : `<span class="bomQty">${escapeHtml(item.quantity)}</span>`;
     }
-    if (key === "revision") return `<span class="bomRevision">${escapeHtml(part?.revision || child?.revision || item?.child_revision || "—")}</span>`;
+    if (key === "revision") {
+      if (isBlankBomItem(item)) return '<span class="bomRevision bomPlaceholder">—</span>';
+      return `<span class="bomRevision">${escapeHtml(part?.revision || child?.revision || item?.child_revision || "—")}</span>`;
+    }
+    if (isBlankBomItem(item)) return '<span class="bomStatus bomPlaceholder">—</span>';
     return `<span class="bomStatus">${escapeHtml(part ? releaseStatusLabel(part) : child ? releaseStatusLabel(child) : "Not found")}</span>`;
   }).join("");
 }
 
-function renderBomAddRow(parentPart) {
+function renderBomNewRow() {
   return `
-    <div class="treeNode bomNode bomAddRow" data-bom-add-parent="${escapeHtml(partKey(parentPart))}" role="row">
-      ${renderBomRowCells({ type: "add" })}
-    </div>
+    <button class="treeNode bomNode bomNewRow" type="button" data-bom-add-blank title="Add row" aria-label="Add BOM row" role="row">
+      <span class="bomNewRowIcon" aria-hidden="true"></span>
+    </button>
   `;
-}
-
-function bomPartSearchMatches(query) {
-  const normalizedQuery = String(query || "").trim().toLowerCase();
-  const rootKey = partKey(getOpenedPart());
-  return sortParts(parts)
-    .filter((part) => partKey(part) !== rootKey)
-    .filter((part) => !normalizedQuery || matchesSearch(part, normalizedQuery))
-    .sort((a, b) => {
-      const aStarts = a.part_number?.toLowerCase().startsWith(normalizedQuery) ? 0 : 1;
-      const bStarts = b.part_number?.toLowerCase().startsWith(normalizedQuery) ? 0 : 1;
-      return aStarts - bStarts;
-    })
-    .slice(0, 10);
-}
-
-function updateBomPartSearchPopout(query) {
-  const input = document.querySelector('[data-bom-add-field="part"]');
-  const popout = document.querySelector("#bomPartSuggestions");
-  if (!input || !popout) {
-    return;
-  }
-  const matches = bomPartSearchMatches(query);
-  popout.innerHTML = matches.length
-    ? matches.map((part) => `
-        <button class="suggestionItem" type="button" role="option" data-select-bom-part="${escapeHtml(partKey(part))}">
-          <strong>${escapeHtml(part.part_number)}</strong>
-          <span>${escapeHtml(part.name || "Unnamed part")}</span>
-          <small>Rev ${escapeHtml(part.revision || "V1")} | ${escapeHtml(releaseStatusLabel(part))} | ${escapeHtml(part.project || "Unassigned project")}</small>
-        </button>
-      `).join("")
-    : '<p class="bomPartSearchEmpty">No matching parts</p>';
-  popout.hidden = false;
-  input.setAttribute("aria-expanded", "true");
-}
-
-function selectBomPartSuggestion(identifier) {
-  const part = findPartByKey(identifier);
-  const row = document.querySelector("[data-bom-add-parent]");
-  const input = row?.querySelector('[data-bom-add-field="part"]');
-  if (!part || !row || !input) {
-    return;
-  }
-  input.value = partKey(part);
-  row.querySelector('[data-bom-add-preview="name"]').textContent = part.name || "Unnamed part";
-  row.querySelector('[data-bom-add-preview="revision"]').textContent = part.revision || "V1";
-  row.querySelector('[data-bom-add-preview="status"]').textContent = releaseStatusLabel(part);
-  const popout = row.querySelector("#bomPartSuggestions");
-  if (popout) {
-    popout.hidden = true;
-  }
-  input.setAttribute("aria-expanded", "false");
-  addBomFromForm(activeBomAddParent || openedPartNumber);
 }
 
 function renderBomChildren(parentPart, depth, visited) {
   return (parentPart.bom ?? [])
     .map((item) => {
+      const blank = isBlankBomItem(item);
       const child = resolveBomChild(item);
-      const childId = child ? partKey(child) : item.child_object_id || item.child_part_number;
+      const childId = blank
+        ? item.child_object_id
+        : (child ? partKey(child) : item.child_object_id || item.child_part_number);
       const active = selectedBomPartNumber === childId ? " active" : "";
       const hasChildren = Boolean(child?.bom?.length);
       const collapsed = hasChildren && collapsedBomNodes.has(childId);
@@ -4581,7 +5099,7 @@ function renderBomChildren(parentPart, depth, visited) {
 
       const row = canEditThisItem
           ? `
-          <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row" draggable="true">
+          <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}${blank ? " bomBlankRow" : ""}" data-bom-part-number="${escapeHtml(childId)}" role="row">
             ${renderBomRowCells({ type: "child", item, child, childId, toggle, editable: true })}
           </div>
         `
@@ -4622,7 +5140,7 @@ function projectKeyFromName(project) {
 }
 
 function projectOwner(project) {
-  return customProjects.find((candidate) => candidate.name === project)?.owner || "engineering@example.com";
+  return customProjects.find((candidate) => candidate.name === project)?.owner || currentEditorName() || "";
 }
 
 function projectDescription(project) {
@@ -4704,8 +5222,10 @@ function moveToPart(partNumber, { editMode = false, newTab = false } = {}) {
   selectedBomPartNumber = objectId;
   activePartEditMode = Boolean(editMode) && isDraftRevision(part);
   activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
   activeAttachmentDraftCount = 0;
   partAsidePanel = null;
+  partOptionsMenuOpen = false;
   activeNavMode = "part";
   if (searchInput) searchInput.value = "";
   if (searchSuggestions) {
@@ -4733,20 +5253,23 @@ function partUrl(identifier, { editMode = false } = {}) {
 }
 
 function syncChrome() {
-  const isOpened = activeNavMode === "part";
-  const isSinglePane = ["settings"].includes(activeNavMode);
-  const isReportPane = activeNavMode === "report";
-  const isProjectPane = activeNavMode === "projects";
-  const isTablePane = activeNavMode === "table" || activeNavMode === "history";
-  const isHomePane = activeNavMode === "home";
+  const isEmpty = !workspaceTabs.length || !activeTabId;
+  const isOpened = !isEmpty && activeNavMode === "part";
+  const isSinglePane = !isEmpty && ["settings"].includes(activeNavMode);
+  const isReportPane = !isEmpty && activeNavMode === "report";
+  const isProjectPane = !isEmpty && activeNavMode === "projects";
+  const isTablePane = !isEmpty && (activeNavMode === "table" || activeNavMode === "history");
+  const isHomePane = !isEmpty && activeNavMode === "home";
   document.body.classList.toggle("openedPartMode", isOpened);
   document.body.classList.toggle("partCanvasMode", isOpened);
   document.body.classList.toggle("searchMode", !isOpened);
+  document.body.classList.toggle("emptyWorkspaceMode", isEmpty);
   if (appRoot) {
-    appRoot.dataset.mode = activeNavMode;
+    appRoot.dataset.mode = isEmpty ? "empty" : activeNavMode;
     appRoot.classList.toggle("sidebar-collapsed", !sidebarOpen);
   }
   appSidebar?.classList.toggle("open", sidebarOpen);
+  setWorkspaceEmptyState(isEmpty);
 
   if (navigatorPane) {
     navigatorPane.hidden = !isOpened;
@@ -4909,10 +5432,6 @@ navigationTree.addEventListener("contextmenu", (event) => {
 });
 
 partsList.addEventListener("input", (event) => {
-  if (event.target.matches("#newPartBasedOn")) {
-    renderBasedOnSuggestions(event.target.value);
-    return;
-  }
   if (event.target.matches("#peakFontSize")) {
     activeFontSize = clamp(Number(event.target.value) || 14, 10, 24);
     localStorage.setItem("peakFontSize", String(activeFontSize));
@@ -4923,10 +5442,6 @@ partsList.addEventListener("input", (event) => {
 partsList.addEventListener("change", (event) => {
   if (event.target.closest("#newPartProject")) {
     generatePartNumberIntoForm();
-    return;
-  }
-  if (event.target.closest("#revisionSourcePart, #newRevisionMinor")) {
-    updateNewRevisionValue();
     return;
   }
   if (event.target.matches("#peakFontFamily")) {
@@ -4943,16 +5458,6 @@ partsList.addEventListener("change", (event) => {
     renderApp();
   }
 });
-
-function updateNewRevisionValue() {
-  const partNumber = document.querySelector("#revisionSourcePart")?.value;
-  const source = latestRevisionForPart(partNumber);
-  const isMinor = document.querySelector("#newRevisionMinor")?.checked === true;
-  const revisionInput = document.querySelector("#newRevisionValue");
-  if (revisionInput) {
-    revisionInput.value = nextRevisionForPart(source, { minor: isMinor });
-  }
-}
 
 partsList.addEventListener("dblclick", (event) => {
   if (event.target.closest("button, input, select, textarea")) {
@@ -4997,6 +5502,30 @@ partsList.addEventListener("keydown", (event) => {
     openSelectedPart({ newTab: true });
   } else {
     renderApp();
+  }
+});
+
+partDetail.addEventListener("input", (event) => {
+  const search = event.target.closest("[data-part-options-search]");
+  if (!search) return;
+  partOptionsSearchQuery = search.value;
+  filterPartOptionsMenu(partOptionsSearchQuery);
+});
+
+partDetail.addEventListener("keydown", (event) => {
+  const search = event.target.closest("[data-part-options-search]");
+  if (!search) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    renderApp();
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const first = partDetail.querySelector(".partOptionsMenuBody .partOptionItem:not([hidden]):not(:disabled)");
+    first?.click();
   }
 });
 
@@ -5051,21 +5580,75 @@ partDetail.addEventListener("click", (event) => {
       handleHistoryAction(partAction.dataset.partAction);
       return;
     }
+    const shouldCloseOptions = partOptionsMenuOpen;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
     handlePartAction(partAction.dataset.partAction);
+    if (shouldCloseOptions) {
+      const menu = partDetail.querySelector(".partOptionsMenu");
+      if (menu) {
+        menu.remove();
+        partDetail.querySelector("[data-part-options-toggle]")?.classList.remove("active");
+        partDetail.querySelector("[data-part-options-toggle]")?.setAttribute("aria-expanded", "false");
+      }
+    }
     return;
   }
 
   const partPanelBtn = event.target.closest("[data-part-panel]");
   if (partPanelBtn) {
     const next = partPanelBtn.dataset.partPanel;
-    partAsidePanel = partAsidePanel === next ? null : next;
+    partOptionsMenuOpen = false;
+    const layout = partDetail.querySelector(".partDetailLayout.partDetailV2");
+    const closing = partAsidePanel === next;
+    partAsidePanel = closing ? null : next;
+    if (layout) {
+      layout.classList.toggle("panel-open", !closing);
+      const slot = layout.querySelector(".partAsideSlot");
+      if (slot) slot.setAttribute("aria-hidden", closing ? "true" : "false");
+      layout.querySelectorAll("[data-part-panel]").forEach((btn) => {
+        const active = !closing && btn.dataset.partPanel === next;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      const optionsBtn = layout.querySelector("[data-part-options-toggle]");
+      optionsBtn?.classList.remove("active");
+      optionsBtn?.setAttribute("aria-expanded", "false");
+      layout.querySelector(".partOptionsMenu")?.remove();
+    } else {
+      renderApp();
+    }
+    return;
+  }
+
+  const optionsToggle = event.target.closest("[data-part-options-toggle]");
+  if (optionsToggle) {
+    event.stopPropagation();
+    partOptionsMenuOpen = !partOptionsMenuOpen;
+    if (!partOptionsMenuOpen) {
+      partOptionsSearchQuery = "";
+    }
     renderApp();
+    if (partOptionsMenuOpen) {
+      focusPartOptionsSearch();
+    }
     return;
   }
 
   if (event.target.closest("[data-part-panel-close]")) {
     partAsidePanel = null;
-    renderApp();
+    const layout = partDetail.querySelector(".partDetailLayout.partDetailV2");
+    if (layout) {
+      layout.classList.remove("panel-open");
+      const slot = layout.querySelector(".partAsideSlot");
+      if (slot) slot.setAttribute("aria-hidden", "true");
+      layout.querySelectorAll("[data-part-panel]").forEach((btn) => {
+        btn.classList.remove("active");
+        btn.setAttribute("aria-pressed", "false");
+      });
+    } else {
+      renderApp();
+    }
     return;
   }
 
@@ -5078,17 +5661,33 @@ partDetail.addEventListener("click", (event) => {
 
   const cancelPartEdit = event.target.closest("[data-cancel-part-edit]");
   if (cancelPartEdit) {
-    activePartEditMode = false;
-    activeAttachmentEditMode = false;
-    activeAttachmentDraftCount = 0;
-    if (openedPartNumber) {
-      selectedPartNumber = openedPartNumber;
-      selectedBomPartNumber = openedPartNumber;
-    }
-    if (openedPartNumber) {
-      window.history.replaceState({}, "", partUrl(openedPartNumber));
-    }
+    cancelOpenPartEdit();
+    return;
+  }
+
+  const cancelAlternateEdit = event.target.closest("[data-cancel-alternate-edit]");
+  if (cancelAlternateEdit) {
+    activeAlternateEditMode = false;
     renderApp();
+    return;
+  }
+
+  const addAlternatePicker = event.target.closest("[data-add-alternate-picker]");
+  if (addAlternatePicker) {
+    const part = getSelectedBomPart() || getOpenedPart();
+    if (part) openAlternateModal(part);
+    return;
+  }
+
+  const removeAlternate = event.target.closest("[data-remove-alternate]");
+  if (removeAlternate) {
+    const part = getSelectedBomPart() || getOpenedPart();
+    const other = latestRevisionForPart(removeAlternate.dataset.removeAlternate) || findPartByKey(removeAlternate.dataset.removeAlternate);
+    if (part && other && unlinkPartsAsAlternates(part, other)) {
+      persistLocalChanges();
+      statusMessage = `Removed alternate ${partObjectLabel(other)}`;
+      renderApp();
+    }
     return;
   }
 
@@ -5116,6 +5715,9 @@ partDetail.addEventListener("click", (event) => {
 
   const workflowButton = event.target.closest("[data-workflow-action]");
   if (workflowButton) {
+    if (!requireProfileForEdit()) return;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
     runWorkflowTransition(workflowButton.dataset.workflowAction, workflowButton.dataset.workflowTo).catch((error) => {
       statusMessage = `Workflow transition failed: ${error.message}`;
       renderApp();
@@ -5138,6 +5740,25 @@ partDetail.addEventListener("click", (event) => {
   moveToPart(button.dataset.partNumber);
 });
 
+function cancelOpenPartEdit() {
+  const opened = getOpenedPart();
+  if (opened?.bom) {
+    opened.bom = bomItemsForPersist(opened.bom);
+  }
+  activePartEditMode = false;
+  activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
+  activeAttachmentDraftCount = 0;
+  partOptionsMenuOpen = false;
+  partOptionsSearchQuery = "";
+  if (openedPartNumber) {
+    selectedPartNumber = openedPartNumber;
+    selectedBomPartNumber = openedPartNumber;
+    window.history.replaceState({}, "", partUrl(openedPartNumber));
+  }
+  renderApp();
+}
+
 function handlePartAction(action) {
   const part = getSelectedBomPart() || getOpenedPart();
   if (action === "pull-main") {
@@ -5148,7 +5769,7 @@ function handlePartAction(action) {
     return;
   }
 
-  if (activePartEditMode && ["edit-attachments", "submit-workflow"].includes(action)) {
+  if (activePartEditMode && ["edit-attachments", "edit-alternates", "submit-workflow"].includes(action)) {
     statusMessage = "Save or cancel the current part edit before changing views";
     selectedPartNumber = openedPartNumber;
     selectedBomPartNumber = openedPartNumber;
@@ -5169,6 +5790,7 @@ function handlePartAction(action) {
     return;
   }
   if (action === "edit-part") {
+    if (!requireProfileForEdit()) return;
     if (!isDraftRevision(part)) {
       statusMessage = "Only draft revisions can be edited";
       renderApp();
@@ -5176,8 +5798,11 @@ function handlePartAction(action) {
     }
     activePartEditMode = true;
     activeAttachmentEditMode = false;
+    activeAlternateEditMode = false;
+    activeAlternateEditMode = false;
     activeAttachmentDraftCount = 0;
     partAsidePanel = null;
+    partOptionsMenuOpen = false;
     selectedPartNumber = partKey(part);
     selectedBomPartNumber = partKey(part);
     openedPartNumber = partKey(part);
@@ -5185,12 +5810,42 @@ function handlePartAction(action) {
     renderApp();
     return;
   }
+  if (action === "save-part") {
+    const opened = getOpenedPart() || part;
+    if (!opened) return;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    handleSaveOpenPart(partKey(opened));
+    return;
+  }
+  if (action === "cancel-part-edit") {
+    cancelOpenPartEdit();
+    return;
+  }
   if (action === "edit-attachments") {
+    if (!requireProfileForEdit()) return;
     activePartEditMode = false;
     activeAttachmentEditMode = true;
+    activeAlternateEditMode = false;
     activeAttachmentDraftCount = 0;
     partAsidePanel = null;
+    partOptionsMenuOpen = false;
     statusMessage = `Editing attachments for ${partObjectLabel(part)}`;
+    if (openedPartNumber) {
+      window.history.replaceState({}, "", partUrl(openedPartNumber));
+    }
+    renderApp();
+    return;
+  }
+  if (action === "edit-alternates") {
+    if (!requireProfileForEdit()) return;
+    activePartEditMode = false;
+    activeAttachmentEditMode = false;
+    activeAlternateEditMode = true;
+    activeAttachmentDraftCount = 0;
+    partAsidePanel = null;
+    partOptionsMenuOpen = false;
+    statusMessage = `Editing alternates for ${partObjectLabel(part)}`;
     if (openedPartNumber) {
       window.history.replaceState({}, "", partUrl(openedPartNumber));
     }
@@ -5200,7 +5855,9 @@ function handlePartAction(action) {
   if (action === "submit-workflow") {
     activePartEditMode = false;
     activeAttachmentEditMode = false;
+    activeAlternateEditMode = false;
     partAsidePanel = null;
+    partOptionsMenuOpen = false;
     statusMessage = `Workflow actions are available on the part page for ${partObjectLabel(part)}`;
     if (openedPartNumber) {
       window.history.replaceState({}, "", partUrl(openedPartNumber));
@@ -5208,8 +5865,52 @@ function handlePartAction(action) {
     renderApp();
     return;
   }
-  if (action === "copy-part-id") {
-    copyPartDetails(part);
+  if (action === "copy-item-id" || action === "copy-part-id") {
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    copyItemId(part);
+    return;
+  }
+  if (action === "copy-item-contents" || action === "copy-part-contents") {
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    copyItemContents(part);
+    return;
+  }
+  if (action === "create-from-source") {
+    if (!requireProfileForEdit()) return;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    pendingAlternateLinkKey = null;
+    openCreateModal("source", { basedOn: partKey(part) });
+    return;
+  }
+  if (action === "create-revision") {
+    if (!requireProfileForEdit()) return;
+    if (draftRevisionsForPart(part.part_number).length > 0) {
+      statusMessage = `Cannot create a new draft revision for ${part.part_number}; a draft revision already exists.`;
+      partOptionsMenuOpen = false;
+      renderApp();
+      return;
+    }
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    openCreateModal("revision", { partNumber: part.part_number });
+    return;
+  }
+  if (action === "add-alternate") {
+    if (!requireProfileForEdit()) return;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    openAlternateModal(part);
+    return;
+  }
+  if (action === "create-alternate") {
+    if (!requireProfileForEdit()) return;
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    pendingAlternateLinkKey = partKey(part);
+    openCreateModal("source", { basedOn: partKey(part) });
   }
 }
 
@@ -5515,8 +6216,8 @@ function openPartLink(url, missingMessage) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-async function copyPartDetails(part) {
-  const text = `${part.part_number}^${part.revision || "A"} - ${part.name || ""}`;
+async function copyItemId(part) {
+  const text = `${part.name || "Untitled"} ${part.part_number || ""}`.trim();
   try {
     await navigator.clipboard.writeText(text);
     statusMessage = `Copied ${text}`;
@@ -5526,14 +6227,63 @@ async function copyPartDetails(part) {
   renderApp();
 }
 
+async function copyItemContents(part) {
+  const lines = [
+    ["Name", part.name || "Untitled"],
+    ["Part Number", part.part_number || ""],
+    ["Revision", part.revision || "A"],
+    ["Project", part.project || "Unassigned"],
+    ["Description", part.description || ""],
+    ["Revision Description", part.change_summary || ""],
+    ["Traceability", traceabilityLabel(part)],
+    ["Legacy Number", legacyPartNumberValue(part) || ""],
+    ["Cost", optionalPartPropertyValue(part, "cost") || ""],
+    ["Mass", optionalPartPropertyValue(part, "mass") || ""],
+    ["Part Maturity", maturityStageLabel(part)],
+    ["Release Status", releaseStatusLabel(part)],
+    ["Created By", createdBy(part)],
+    ["Created", part.created_at || ""],
+    ["Last Updated By", updatedBy(part)],
+    ["Updated", part.updated_at || ""],
+    ["Based On", part.based_on || ""],
+    ["Alternates", alternatesForPart(part).join(", ") || ""]
+  ];
+  const text = lines.map(([label, value]) => `${label}: ${value}`).join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    statusMessage = `Copied contents for ${partObjectLabel(part)}`;
+  } catch {
+    statusMessage = text;
+  }
+  renderApp();
+}
+
+async function copyPartDetails(part) {
+  return copyItemId(part);
+}
+
 navigationTree.addEventListener("click", (event) => {
+  const addBlank = event.target.closest("[data-bom-add-blank]");
+  if (addBlank) {
+    event.preventDefault();
+    insertBlankBomRow();
+    return;
+  }
+
+  const pickItem = event.target.closest("[data-bom-pick-item]");
+  if (pickItem) {
+    event.preventDefault();
+    event.stopPropagation();
+    openSearchFilterPicker("bomItem", pickItem);
+    return;
+  }
+
   const button = event.target.closest("[data-select-bom-part], [data-toggle-bom-collapse], [data-focus-project], [data-focus-create], [data-focus-settings], [data-generate-part-number], [data-create-mode], [data-settings-tab], [data-sync-action], [data-action], [data-bom-part-number], [data-filter-state], [data-filter-project], [data-clear-filters]");
   if (!button) {
     return;
   }
 
   if (button.dataset.selectBomPart) {
-    selectBomPartSuggestion(button.dataset.selectBomPart);
     return;
   }
 
@@ -5585,7 +6335,10 @@ navigationTree.addEventListener("click", (event) => {
   }
 
   if (button.dataset.bomPartNumber) {
-    if (event.target.closest("input, select, textarea")) {
+    if (event.target.closest("input, select, textarea, [data-bom-pick-item], [data-bom-drag]")) {
+      return;
+    }
+    if (String(button.dataset.bomPartNumber).startsWith("blank:")) {
       return;
     }
     if (preventPartNavigationDuringEdit(button.dataset.bomPartNumber)) {
@@ -5621,52 +6374,24 @@ navigationTree.addEventListener("change", (event) => {
   updateBomQuantity(quantityInput.dataset.bomQty, quantityInput.value);
 });
 
-navigationTree.addEventListener("input", (event) => {
-  const partInput = event.target.closest('[data-bom-add-field="part"]');
-  if (partInput) {
-    updateBomPartSearchPopout(partInput.value);
-  }
-});
-
-navigationTree.addEventListener("focusin", (event) => {
-  const partInput = event.target.closest('[data-bom-add-field="part"]');
-  if (partInput) {
-    updateBomPartSearchPopout(partInput.value);
-  }
-});
-
-navigationTree.addEventListener("keydown", (event) => {
-  const partInput = event.target.closest('[data-bom-add-field="part"]');
-  if (!partInput) {
-    return;
-  }
-  if (event.key === "Escape") {
-    const popout = document.querySelector("#bomPartSuggestions");
-    if (popout) popout.hidden = true;
-    partInput.setAttribute("aria-expanded", "false");
-    return;
-  }
-  if (event.key === "Enter") {
-    const firstMatch = bomPartSearchMatches(partInput.value)[0];
-    if (firstMatch) {
-      event.preventDefault();
-      selectBomPartSuggestion(partKey(firstMatch));
-    }
-  }
-});
-
 navigationTree.addEventListener("dragstart", (event) => {
-  const row = event.target.closest(".bomNode.child[draggable='true']");
-  if (!row || !activePartEditMode || event.target.closest("input, select, textarea")) {
+  const handle = event.target.closest("[data-bom-drag]");
+  if (!handle || !activePartEditMode) {
+    if (event.target.closest(".bomNode.child")) event.preventDefault();
+    return;
+  }
+  const row = handle.closest(".bomNode.child");
+  if (!row) {
+    event.preventDefault();
     return;
   }
   row.classList.add("isDragging");
   event.dataTransfer.effectAllowed = "move";
-  event.dataTransfer.setData("text/plain", row.dataset.bomPartNumber);
+  event.dataTransfer.setData("text/plain", handle.dataset.bomDrag || row.dataset.bomPartNumber);
 });
 
 navigationTree.addEventListener("dragover", (event) => {
-  const row = event.target.closest(".bomNode.child[draggable='true']");
+  const row = event.target.closest(".bomNode.child:not(.bomBlankRow)");
   if (!row || !activePartEditMode) {
     return;
   }
@@ -5680,7 +6405,7 @@ navigationTree.addEventListener("dragleave", (event) => {
 });
 
 navigationTree.addEventListener("drop", (event) => {
-  const row = event.target.closest(".bomNode.child[draggable='true']");
+  const row = event.target.closest(".bomNode.child:not(.bomBlankRow)");
   if (!row || !activePartEditMode) {
     return;
   }
@@ -5712,21 +6437,16 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".searchBox")) {
     searchSuggestions.classList.remove("visible");
   }
-  if (!event.target.closest(".bomPartPicker")) {
-    const bomSuggestions = document.querySelector("#bomPartSuggestions");
-    const bomPartInput = document.querySelector('[data-bom-add-field="part"]');
-    if (bomSuggestions) bomSuggestions.hidden = true;
-    if (bomPartInput) bomPartInput.setAttribute("aria-expanded", "false");
-  }
-  if (!event.target.closest(".createFormDropWrap")) {
-    const basedOnSuggestions = document.querySelector("#basedOnSuggestions");
-    if (basedOnSuggestions) basedOnSuggestions.hidden = true;
-  }
   if (!event.target.closest("#partContextMenu")) {
     hidePartContextMenu();
   }
   if (!event.target.closest("#searchFilterPicker") && !event.target.closest("[data-filter-picker]")) {
     closeSearchFilterPicker();
+  }
+  if (partOptionsMenuOpen && !event.target.closest(".partOptionsWrap")) {
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    renderApp();
   }
 });
 searchSuggestions.addEventListener("click", (event) => {
@@ -5746,8 +6466,7 @@ partContextMenu.addEventListener("click", (event) => {
     const parentIdentifier = partContextMenu.dataset.bomParentNumber || openedPartNumber;
     hidePartContextMenu();
     if (actionButton.dataset.contextAction === "bom-add") {
-      activeBomAddParent = parentIdentifier;
-      renderApp();
+      insertBlankBomRow({ afterIdentifier: childIdentifier || "" });
       return;
     }
     if (actionButton.dataset.contextAction === "bom-delete" && childIdentifier) {
@@ -5792,8 +6511,21 @@ document.addEventListener("keydown", (event) => {
       closeSearchFilterPicker();
       return;
     }
-    closeCreateModal();
-    closeSearchModal();
+    if (alternateModal && !alternateModal.hidden) {
+      closeAlternateModal();
+      return;
+    }
+    if (settingsModal && !settingsModal.hidden) {
+      closeSettingsModal();
+      return;
+    }
+    if (createModal && !createModal.hidden) {
+      closeCreateModal();
+      return;
+    }
+    if (searchModal && !searchModal.hidden) {
+      closeSearchModal();
+    }
   }
 });
 stateFilter?.addEventListener("change", () => {
@@ -5909,6 +6641,8 @@ document.querySelector("#sidebarToggle")?.addEventListener("click", () => {
 document.querySelector("#navBackBtn")?.addEventListener("click", () => navigateTabHistory(-1));
 document.querySelector("#navForwardBtn")?.addEventListener("click", () => navigateTabHistory(1));
 document.querySelector("#tabSearchAdd")?.addEventListener("click", () => openSearchModal());
+workspaceOpenItem?.addEventListener("click", () => openSearchModal());
+document.querySelector("#tabSearchAdd")?.addEventListener("click", () => openSearchModal());
 
 tabListEl?.addEventListener("click", (event) => {
   const closeBtn = event.target.closest("[data-close-tab]");
@@ -6001,7 +6735,7 @@ appSidebar?.addEventListener("click", (event) => {
       return;
     }
     if (kind === "create") {
-      openCreateModal("hub");
+      openCreateModal("new");
       return;
     }
     if (kind === "inbox") {
@@ -6021,15 +6755,35 @@ appSidebar?.addEventListener("click", (event) => {
     return;
   }
 
+  if (event.target.closest("[data-open-settings]")) {
+    openSettingsModal(activeSettingsTab || "profile");
+    return;
+  }
+
+  const toggleSidebarBom = event.target.closest("[data-toggle-sidebar-bom]");
+  if (toggleSidebarBom) {
+    event.preventDefault();
+    event.stopPropagation();
+    const nodeId = toggleSidebarBom.dataset.toggleSidebarBom;
+    if (expandedSidebarBomNodes.has(nodeId)) {
+      expandedSidebarBomNodes.delete(nodeId);
+    } else {
+      expandedSidebarBomNodes.add(nodeId);
+    }
+    saveExpandedSidebarBomNodes();
+    renderProjectsTree();
+    return;
+  }
+
   const toggleProject = event.target.closest("[data-toggle-project]");
   if (toggleProject) {
     const name = toggleProject.dataset.toggleProject;
-    if (collapsedProjectFolders.has(name)) {
-      collapsedProjectFolders.delete(name);
+    if (expandedProjectFolders.has(name)) {
+      expandedProjectFolders.delete(name);
     } else {
-      collapsedProjectFolders.add(name);
+      expandedProjectFolders.add(name);
     }
-    saveCollapsedProjects();
+    saveExpandedProjects();
     renderProjectsTree();
     return;
   }
@@ -6045,6 +6799,8 @@ document.addEventListener("click", (event) => {
   if (closeModal) {
     if (closeModal.dataset.closeModal === "create") closeCreateModal();
     if (closeModal.dataset.closeModal === "search") closeSearchModal();
+    if (closeModal.dataset.closeModal === "alternate") closeAlternateModal();
+    if (closeModal.dataset.closeModal === "settings") closeSettingsModal();
     return;
   }
 
@@ -6065,8 +6821,7 @@ document.addEventListener("click", (event) => {
 
   const searchSelect = event.target.closest("[data-search-select]");
   if (searchSelect) {
-    searchModalSelection = searchSelect.dataset.searchSelect;
-    renderSearchModalResults();
+    selectSearchModalResult(searchSelect.dataset.searchSelect);
     return;
   }
 
@@ -6076,32 +6831,118 @@ document.addEventListener("click", (event) => {
   }
 });
 
+searchModalList?.addEventListener("dblclick", (event) => {
+  const searchSelect = event.target.closest("[data-search-select]");
+  if (!searchSelect || searchModal?.hidden) return;
+  event.preventDefault();
+  moveToPart(searchSelect.dataset.searchSelect);
+});
+
 createModal?.addEventListener("click", (event) => {
-  const createModeButton = event.target.closest("[data-create-mode]");
-  if (createModeButton) {
-    activeCreateMode = createModeButton.dataset.createMode;
-    renderCreateModalBody();
+  const picker = event.target.closest("[data-filter-picker]");
+  if (picker) {
+    openSearchFilterPicker(picker.dataset.filterPicker, picker);
     return;
   }
   const createButton = event.target.closest("[data-submit-create]");
   if (createButton) {
-    createPartFromForm();
-    closeCreateModal();
+    if (createPartFromForm()) {
+      closeCreateModal();
+    }
     return;
   }
   const revisionButton = event.target.closest("[data-submit-revision]");
   if (revisionButton) {
-    createRevisionFromForm();
-    closeCreateModal();
+    if (createRevisionFromForm()) {
+      closeCreateModal();
+    }
+  }
+});
+
+createModal?.addEventListener("change", (event) => {
+  if (event.target.closest("#newPartProject")) {
+    generatePartNumberIntoForm();
+  }
+});
+
+settingsModal?.addEventListener("click", (event) => {
+  const section = event.target.closest("[data-settings-section]");
+  if (section) {
+    activeSettingsTab = section.dataset.settingsSection || "profile";
+    renderSettingsModal();
     return;
   }
-  const projectButton = event.target.closest("[data-submit-project]");
-  if (projectButton) {
-    createProjectFromForm().then(() => closeCreateModal()).catch((error) => {
-      statusMessage = `Project create failed: ${error.message}`;
-      renderCreateModalBody();
-    });
+
+  if (event.target.closest("[data-save-profile]")) {
+    saveProfileFromForm();
+    return;
   }
+
+  if (event.target.closest("[data-save-settings]")) {
+    saveSettingsFromForm().catch((error) => {
+      statusMessage = `Setup save failed: ${runnerErrorMessage(error)}`;
+      renderSettingsModal();
+    });
+    return;
+  }
+
+  if (event.target.closest("[data-connect-github]")) {
+    connectGitHub();
+    return;
+  }
+
+  if (event.target.closest("[data-refresh-github-auth]")) {
+    refreshGitHubAuthStatus();
+    return;
+  }
+
+  if (event.target.closest("[data-select-product-folder]")) {
+    selectProductDataFolder();
+    return;
+  }
+
+  const themeModeButton = event.target.closest("[data-theme-mode]");
+  if (themeModeButton) {
+    activeColorScheme = themeModeButton.dataset.themeMode;
+    applyAppearance(activeColorScheme);
+    localStorage.setItem("peakColorScheme", activeColorScheme);
+    refreshSettingsSurfaces();
+    renderApp();
+  }
+});
+
+settingsModal?.addEventListener("input", (event) => {
+  if (event.target.matches("#peakFontSize")) {
+    activeFontSize = clamp(Number(event.target.value) || 14, 10, 24);
+    localStorage.setItem("peakFontSize", String(activeFontSize));
+    applyAppearance(activeColorScheme);
+  }
+});
+
+settingsModal?.addEventListener("change", (event) => {
+  if (event.target.matches("#peakFontFamily")) {
+    activeFontFamily = event.target.value || "inter";
+    localStorage.setItem("peakFontFamily", activeFontFamily);
+    applyAppearance(activeColorScheme);
+    refreshSettingsSurfaces();
+    return;
+  }
+  if (event.target.matches("#peakFontSize")) {
+    activeFontSize = clamp(Number(event.target.value) || 14, 10, 24);
+    localStorage.setItem("peakFontSize", String(activeFontSize));
+    applyAppearance(activeColorScheme);
+    refreshSettingsSurfaces();
+  }
+});
+
+alternateSearchInput?.addEventListener("input", () => {
+  renderAlternateModalResults();
+});
+
+alternateModal?.addEventListener("click", (event) => {
+  const assign = event.target.closest("[data-assign-alternate]");
+  if (!assign) return;
+  assignAlternateFromPicker(assign.dataset.assignAlternate);
 });
 
 searchInput?.addEventListener("input", () => {
@@ -6116,15 +6957,6 @@ partsList.addEventListener("click", (event) => {
     selectedProjectName = projectCard.dataset.projectName;
     activeProjectEditMode = false;
     renderApp();
-    return;
-  }
-
-  const basedOnButton = event.target.closest("[data-based-on-part]");
-  if (basedOnButton) {
-    const input = document.querySelector("#newPartBasedOn");
-    if (input) input.value = basedOnButton.dataset.basedOnPart;
-    const suggestions = document.querySelector("#basedOnSuggestions");
-    if (suggestions) suggestions.hidden = true;
     return;
   }
 
@@ -6184,8 +7016,15 @@ partsList.addEventListener("click", (event) => {
   if (saveSettingsButton) {
     saveSettingsFromForm().catch((error) => {
       statusMessage = `Setup save failed: ${runnerErrorMessage(error)}`;
-      renderApp();
+      if (settingsModal && !settingsModal.hidden) renderSettingsModal();
+      else renderApp();
     });
+    return;
+  }
+
+  const saveProfileButton = event.target.closest("[data-save-profile]");
+  if (saveProfileButton) {
+    saveProfileFromForm();
     return;
   }
 
@@ -6230,7 +7069,15 @@ partsList.addEventListener("click", (event) => {
     activeColorScheme = themeModeButton.dataset.themeMode;
     applyAppearance(activeColorScheme);
     localStorage.setItem("peakColorScheme", activeColorScheme);
+    refreshSettingsSurfaces();
     renderApp();
+    return;
+  }
+
+  const settingsSection = event.target.closest("[data-settings-section]");
+  if (settingsSection && settingsModal && !settingsModal.hidden) {
+    activeSettingsTab = settingsSection.dataset.settingsSection || "profile";
+    renderSettingsModal();
     return;
   }
 
@@ -6248,9 +7095,11 @@ partsList.addEventListener("click", (event) => {
 
   const gateJumpButton = event.target.closest("[data-gate-jump]");
   if (gateJumpButton) {
+    if (!requireProfileForEdit()) return;
     activePropertyTab = "overview";
     activePartEditMode = true;
     activeAttachmentEditMode = false;
+    activeAlternateEditMode = false;
     renderApp();
     const field = gateJumpButton.dataset.gateJump;
     const target = document.querySelector(`[data-open-part-field="${field}"]`);
@@ -6586,7 +7435,7 @@ function enableSidebarResizing() {
 
 function runAction(action) {
   if (action === "create-part") {
-    openCreateModal("hub");
+    openCreateModal("new");
   }
   if (action === "link-drive") {
     linkExternalRecord("documents");
@@ -6603,6 +7452,7 @@ function runAction(action) {
 }
 
 function createPartFromForm() {
+  if (!requireProfileForEdit()) return false;
   const createMode = document.querySelector("[data-submit-create]")?.dataset.submitCreate || activeCreateMode;
   const values = {
     partNumber: canonicalPartNumber(document.querySelector("#newPartNumber")?.value.trim()),
@@ -6610,17 +7460,18 @@ function createPartFromForm() {
     project: document.querySelector("#newPartProject")?.value.trim(),
     revision: document.querySelector("#newPartRevision")?.value.trim() || "A",
     state: "draft",
-    owner: localStorage.getItem("peakDefaultOwner") || "engineering@example.com",
+    owner: currentEditorName(),
     description: "",
     driveUrl: "",
     onshapeUrl: "",
-    basedOn: document.querySelector("#newPartBasedOn")?.value.trim()
+    basedOn: document.querySelector("#newPartBasedOn")?.value.trim(),
+    traceability: ""
   };
   const validationError = validateDraftCreate(values, { fromSource: createMode === "source" });
   if (validationError) {
     statusMessage = validationError;
-    renderApp();
-    return;
+    showCreateFormError(validationError);
+    return false;
   }
   const preflight = draftRemotePreflight();
   const created = createPartRecord(values, { render: false });
@@ -6633,24 +7484,54 @@ function createPartFromForm() {
         ...(createdPart.revision_properties || {}),
         based_on: partKey(source)
       };
+      const linkSource = pendingAlternateLinkKey ? findPartByKey(pendingAlternateLinkKey) : null;
+      if (linkSource) {
+        linkPartsAsAlternates(linkSource, createdPart);
+      }
       persistLocalChanges();
     }
+    pendingAlternateLinkKey = null;
     statusMessage = `${preflight} Created draft ${values.partNumber}^${values.revision}; open and save the draft to push through the local runner.`;
     renderProjectOptions();
     moveToPart(`${values.partNumber}^${values.revision}`, { editMode: true });
+    return true;
   }
+  showCreateFormError(statusMessage || "Could not create part");
+  return false;
+}
+
+function showCreateFormError(message) {
+  const form = document.querySelector("#createModalBody .createForm");
+  if (!form) return;
+  let error = form.querySelector(".createFormError");
+  if (!error) {
+    error = document.createElement("p");
+    error.className = "createFormError";
+    error.setAttribute("role", "alert");
+    form.insertBefore(error, form.querySelector(".createFormActions"));
+  }
+  error.textContent = message;
 }
 
 function generatePartNumberIntoForm() {
-  const project = document.querySelector("#newPartProject")?.value || projects()[0] || "Unassigned Project";
+  const project = document.querySelector("#newPartProject")?.value || "";
   const input = document.querySelector("#newPartNumber");
-  if (input) {
-    input.value = nextProjectPartNumber(project);
+  if (!input) return;
+  if (!project) {
+    input.value = "";
+    return;
   }
+  input.value = nextProjectPartNumber(project);
 }
 
 function validateDraftCreate(values, { fromSource }) {
-  if (values.project && !projects().includes(values.project)) {
+  if (!values.name) {
+    return "Name is required";
+  }
+  if (!values.project) {
+    return "Project is required";
+  }
+  if (!projects().includes(values.project)) {
     return "Project must exist before assigning it to a part";
   }
   if (!values.partNumber) {
@@ -6659,14 +7540,9 @@ function validateDraftCreate(values, { fromSource }) {
   if (parts.some((part) => canonicalPartNumber(part.part_number) === canonicalPartNumber(values.partNumber))) {
     return `${values.partNumber} is already in use`;
   }
-  if (values.project) {
-    const projectNumberError = validatePartNumberForProject(values.partNumber, values.project);
-    if (projectNumberError) {
-      return projectNumberError;
-    }
-  }
-  if (!values.name) {
-    return "Part name is required";
+  const projectNumberError = validatePartNumberForProject(values.partNumber, values.project);
+  if (projectNumberError) {
+    return projectNumberError;
   }
   if (fromSource && !findPartByKey(values.basedOn)) {
     return "Based On must reference an existing part";
@@ -6679,35 +7555,38 @@ function draftRemotePreflight() {
 }
 
 function createRevisionFromForm() {
-  const partNumber = document.querySelector("#revisionSourcePart")?.value;
+  if (!requireProfileForEdit()) return false;
+  const partNumber = document.querySelector("#revisionSourcePart")?.value || createModalSeed?.partNumber;
   const source = latestRevisionForPart(partNumber);
-  const isMinor = document.querySelector("#newRevisionMinor")?.checked === true;
-  const revision = nextRevisionForPart(source, { minor: isMinor });
+  const revision = nextRevisionForPart(source);
   if (!source) {
     statusMessage = "Select an existing part before creating a revision";
     renderApp();
-    return;
+    return false;
   }
   const existingUnreleased = unreleasedRevisionsForPart(partNumber)[0];
   if (existingUnreleased) {
     statusMessage = `Cannot create a new draft revision for ${partNumber}; ${partObjectLabel(existingUnreleased)} is already ${releaseStatusLabel(existingUnreleased)}.`;
     renderApp();
-    return;
+    return false;
   }
   if (!revision || parts.some((part) => part.part_number === partNumber && part.revision === revision)) {
     statusMessage = "Next revision is not available";
     renderApp();
-    return;
+    return false;
   }
   const preflight = draftRemotePreflight();
   const created = createRevisionRecord(source, revision);
   if (created) {
     statusMessage = `${preflight} Created draft ${partNumber}^${revision}; open and save the draft to push through the local runner.`;
     moveToPart(`${partNumber}^${revision}`, { editMode: true });
+    return true;
   }
+  return false;
 }
 
 async function createProjectFromForm() {
+  if (!requireProfileForEdit()) return;
   const name = document.querySelector("#newProjectName")?.value.trim();
   const key = document.querySelector("#newProjectKey")?.value.trim();
   const owner = document.querySelector("#newProjectOwner")?.value.trim();
@@ -6739,13 +7618,14 @@ async function createProjectFromForm() {
   customProjects.push({ name, key, owner, description, approvers, allow_custom_part_numbers: allowCustomPartNumbers });
   await persistLocalChanges();
   renderProjectOptions();
-  activeCreateMode = "hub";
+  activeCreateMode = "new";
   statusMessage = `Created project ${name}; pushing to ${productDataRemoteLabel()}.`;
   renderApp();
   await pushProjectsToRunner(`Create project ${name}`, name);
 }
 
 function savePartFromRow(originalPartNumber) {
+  if (!requireProfileForEdit()) return;
   const part = findPartByKey(originalPartNumber);
   if (!part) {
     return;
@@ -6809,7 +7689,7 @@ async function saveProjectValues(originalProject, values) {
   const existing = customProjects.find((project) => project.name === originalProject);
   if (existing) {
     existing.key = values.key || existing.key || projectKey(originalProject);
-    existing.owner = values.owner || "engineering@example.com";
+    existing.owner = values.owner || currentEditorName() || "";
     existing.description = values.description || "";
     existing.drive_url = values.drive_url || "";
     existing.allow_custom_part_numbers = values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true";
@@ -6818,7 +7698,7 @@ async function saveProjectValues(originalProject, values) {
     customProjects.push({
       name: originalProject,
       key: values.key || projectKey(originalProject),
-      owner: values.owner || "engineering@example.com",
+      owner: values.owner || currentEditorName() || "",
       description: values.description || "",
       drive_url: values.drive_url || "",
       allow_custom_part_numbers: values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true",
@@ -6851,6 +7731,7 @@ async function handleSaveAttachments(originalPartNumber) {
 }
 
 async function saveOpenPartFromForm(originalPartNumber) {
+  if (!requireProfileForEdit()) return;
   const part = findPartByKey(originalPartNumber);
   if (!part) {
     return;
@@ -6948,7 +7829,7 @@ async function saveOpenPartFromForm(originalPartNumber) {
     updated_at: part.updated_at,
     based_on: part.based_on || null,
     approvers: part.approvers,
-    bom: part.bom || [],
+    bom: bomItemsForPersist(part.bom),
     attachments: part.attachments || [],
     activity_history: part.activity_history || [],
     change_summary: part.change_summary
@@ -6961,6 +7842,7 @@ async function saveOpenPartFromForm(originalPartNumber) {
   openedPartNumber = partKey(part);
   activePartEditMode = false;
   activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
   activeAttachmentDraftCount = 0;
   statusMessage = `Saved ${partObjectLabel(part)} locally; pushing draft edit to ${productDataRemoteLabel()}.`;
   window.history.replaceState({}, "", partUrl(partKey(part)));
@@ -6971,6 +7853,7 @@ async function saveOpenPartFromForm(originalPartNumber) {
 }
 
 async function saveAttachmentsFromForm(originalPartNumber) {
+  if (!requireProfileForEdit()) return;
   const part = findPartByKey(originalPartNumber);
   if (!part) {
     return;
@@ -7020,6 +7903,7 @@ async function saveAttachmentsFromForm(originalPartNumber) {
   selectedBomPartNumber = partKey(part);
   openedPartNumber = partKey(part);
   activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
   activeAttachmentDraftCount = 0;
   statusMessage = `Saved attachments for ${partObjectLabel(part)} locally; pushing to ${productDataRemoteLabel()}.`;
   renderApp();
@@ -7062,41 +7946,78 @@ function removeAttachmentRecords(records, removalKeys) {
   return asArray(records).filter((record) => !removalSet.has(attachmentRecordKey(record)));
 }
 
-function addBomFromForm(parentIdentifier = "") {
+function insertBlankBomRow({ afterIdentifier = "" } = {}) {
+  if (!requireProfileForEdit()) return;
   const rootPart = getOpenedPart();
-  const parentPart = parentIdentifier ? findPartByKey(parentIdentifier) : rootPart;
-  const row = document.querySelector("[data-bom-add-parent]");
-  const childObjectId = row?.querySelector('[data-bom-add-field="part"]')?.value.trim();
-  const childPart = findPartByKey(childObjectId);
-  if (!parentPart || !childPart) {
-    statusMessage = "Select a valid part to add";
-    renderApp();
+  if (!rootPart || !activePartEditMode) {
     return;
   }
-  if (partKey(parentPart) !== partKey(rootPart)) {
+  if (partKey(rootPart) !== openedPartNumber) {
     statusMessage = "Open the subassembly to edit its BOM";
     renderApp();
     return;
   }
-  const quantity = Number(row?.querySelector('[data-bom-add-field="quantity"]')?.value || 1);
-  parentPart.bom = parentPart.bom || [];
-  if (parentPart.bom.some((item) => (resolveBomChild(item) ? partKey(resolveBomChild(item)) === partKey(childPart) : item.child_object_id === partKey(childPart)))) {
+  rootPart.bom = rootPart.bom || [];
+  const blank = createBlankBomItem();
+  if (afterIdentifier) {
+    const index = rootPart.bom.findIndex((item) => bomItemIdentifier(item) === afterIdentifier);
+    if (index >= 0) rootPart.bom.splice(index + 1, 0, blank);
+    else rootPart.bom.push(blank);
+  } else {
+    rootPart.bom.push(blank);
+  }
+  statusMessage = "Select an item for the new BOM row";
+  renderBomTree();
+  enableBomColumnResizing();
+  enableBomColumnReordering();
+  if (recordCount) recordCount.textContent = statusMessage;
+}
+
+function assignBomRowPart(rowIdentifier, partNumber) {
+  if (!requireProfileForEdit()) return;
+  const rootPart = getOpenedPart();
+  const owner = findBomItemOwner(rowIdentifier);
+  const childPart = latestRevisionForPart(partNumber) || findPartByKey(partNumber);
+  if (!rootPart || !owner || !childPart) {
+    statusMessage = "Select a valid part";
+    renderApp();
+    return;
+  }
+  if (owner.parent !== rootPart) {
+    statusMessage = "Open the subassembly to edit its BOM";
+    renderApp();
+    return;
+  }
+  if (partKey(childPart) === partKey(rootPart)) {
+    statusMessage = "A part cannot reference itself in its BOM";
+    renderApp();
+    return;
+  }
+  const duplicate = (owner.parent.bom || []).some((item, index) => {
+    if (index === owner.index) return false;
+    const existing = resolveBomChild(item);
+    return existing && partKey(existing) === partKey(childPart);
+  });
+  if (duplicate) {
     statusMessage = `${partObjectLabel(childPart)} is already in this BOM`;
     renderApp();
     return;
   }
-  parentPart.bom.push({
-    child_object_id: partKey(childPart),
-    child_part_number: childPart.part_number,
-    child_revision: childPart.revision,
-    quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
-    unit: "each"
-  });
-  parentPart.updated_at = new Date().toISOString().slice(0, 10);
-  activeBomAddParent = "";
+  const wasBlank = isBlankBomItem(owner.item);
+  owner.item.child_object_id = partKey(childPart);
+  owner.item.child_part_number = childPart.part_number;
+  owner.item.child_revision = childPart.revision;
+  if (!Number(owner.item.quantity)) owner.item.quantity = 1;
+  if (!owner.item.unit) owner.item.unit = "each";
+  owner.parent.updated_at = new Date().toISOString().slice(0, 10);
   persistLocalChanges();
-  statusMessage = `Added ${partObjectLabel(childPart)} to ${partObjectLabel(parentPart)}`;
-  renderApp();
+  statusMessage = wasBlank
+    ? `Added ${partObjectLabel(childPart)} to ${partObjectLabel(owner.parent)}`
+    : `Updated BOM item to ${partObjectLabel(childPart)}`;
+  renderBomTree();
+  enableBomColumnResizing();
+  enableBomColumnReordering();
+  if (recordCount) recordCount.textContent = statusMessage;
 }
 
 function toggleBomCollapse(partIdentifier) {
@@ -7109,18 +8030,24 @@ function toggleBomCollapse(partIdentifier) {
 }
 
 function removeBomItem(childIdentifier) {
+  if (!requireProfileForEdit()) return;
   const owner = findBomItemOwner(childIdentifier);
   if (!owner) {
     return;
   }
+  const blank = isBlankBomItem(owner.item);
   owner.parent.bom = (owner.parent.bom || []).filter((item) => bomItemIdentifier(item) !== childIdentifier);
   owner.parent.updated_at = new Date().toISOString().slice(0, 10);
-  persistLocalChanges();
-  statusMessage = `Removed ${childIdentifier}`;
+  if (selectedBomPartNumber === childIdentifier) {
+    selectedBomPartNumber = openedPartNumber;
+  }
+  if (!blank) persistLocalChanges();
+  statusMessage = blank ? "Removed blank BOM row" : `Removed ${childIdentifier}`;
   renderApp();
 }
 
 function updateBomQuantity(childIdentifier, rawQuantity) {
+  if (!requireProfileForEdit()) return;
   const owner = findBomItemOwner(childIdentifier);
   const item = owner?.item;
   const quantity = Number(rawQuantity);
@@ -7129,8 +8056,10 @@ function updateBomQuantity(childIdentifier, rawQuantity) {
   }
   item.quantity = quantity;
   owner.parent.updated_at = new Date().toISOString().slice(0, 10);
-  persistLocalChanges();
-  statusMessage = `Updated ${childIdentifier} quantity`;
+  if (!isBlankBomItem(item)) {
+    persistLocalChanges();
+    statusMessage = `Updated ${childIdentifier} quantity`;
+  }
   renderApp();
 }
 
@@ -7213,12 +8142,14 @@ async function saveSettingsFromForm() {
   const configuredProductData = runnerProductDataDir || (productDataDirectoryHandle ? productDataFolderName : "");
   if (!configuredProductData) {
     statusMessage = "Select a product data folder before configuring its remote";
+    refreshSettingsSurfaces();
     renderApp();
     return;
   }
   const remote = document.querySelector("#settingsProductDataRemote")?.value.trim() || "";
   if (!remote) {
     statusMessage = "Enter the Product Data Remote before saving setup";
+    refreshSettingsSurfaces();
     renderApp();
     return;
   }
@@ -7233,12 +8164,13 @@ async function saveSettingsFromForm() {
   }
   productDataRemote = payload.remote || remote;
   statusMessage = `Using product data folder ${configuredProductData}; remote ${productDataRemote}`;
+  refreshSettingsSurfaces();
   renderApp();
 }
 
 function savePreferencesFromForm() {
-  const defaultOwner = document.querySelector("#settingsDefaultOwner")?.value.trim() || "engineering@example.com";
-  localStorage.setItem("peakDefaultOwner", defaultOwner);
+  const defaultOwner = currentEditorName() || document.querySelector("#settingsDefaultOwner")?.value.trim() || "";
+  if (defaultOwner) localStorage.setItem("peakDefaultOwner", defaultOwner);
   statusMessage = "Preferences saved";
   renderApp();
 }
@@ -7269,6 +8201,7 @@ async function refreshGitHubAuthStatus({ render = true } = {}) {
   } finally {
     githubAuthChecking = false;
     if (render) {
+      refreshSettingsSurfaces();
       renderApp();
     }
   }
@@ -7287,6 +8220,7 @@ async function connectGitHub({ workflow, part } = {}) {
   if (workflow && part) {
     setWorkflowFeedback(workflow, part, "running", "Opening PEAK GitHub Login...");
   }
+  refreshSettingsSurfaces();
   renderApp();
   try {
     const response = await fetch(peakRunnerGitHubAuthLoginUrl, { method: "POST" });
@@ -7312,6 +8246,7 @@ async function connectGitHub({ workflow, part } = {}) {
       setWorkflowFeedback(workflow, part, "error", `GitHub connection failed: ${error.message}`);
     }
   }
+  refreshSettingsSurfaces();
   renderApp();
 }
 
@@ -7355,7 +8290,7 @@ function startGitHubAuthPolling({ workflow, part } = {}) {
 
 function createPartRecord(values, options = {}) {
   const shouldRender = options.render !== false;
-  if (!values.partNumber || !values.name || !values.revision || !values.state || !values.owner) {
+  if (!values.partNumber || !values.name || !values.project || !values.revision || !values.state || !values.owner) {
     statusMessage = "Missing required create fields";
     if (shouldRender) {
       renderApp();
@@ -7399,12 +8334,13 @@ function createPartRecord(values, options = {}) {
     description: values.description || "",
     legacy_part_number: values.legacyPartNumber || values.legacy_part_number || "",
     project: values.project,
-    traceability: "LOT",
+    traceability: normalizeTraceability(values.traceability) || "",
     maturity: "development",
     onshape: onshapeLinks,
     work_instructions: [],
     file_links: fileLinks,
     tags: [],
+    alternates: [],
     revisions: [`${values.partNumber}^${values.revision}.json`]
   };
   const revisionProperties = {
@@ -7450,7 +8386,8 @@ function createPartRecord(values, options = {}) {
     updated_by: values.owner,
     release_status: values.state,
     maturity: "development",
-    traceability: "LOT",
+    traceability: normalizeTraceability(values.traceability) || "",
+    alternates: [],
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
@@ -7480,7 +8417,7 @@ function createRevisionRecord(source, revision) {
     return false;
   }
   const today = new Date().toISOString().slice(0, 10);
-  const owner = currentEditorName() || source.owner || "engineering@example.com";
+  const owner = currentEditorName() || source.owner || "";
   const revisionProperties = {
     schema: "peak.revision.v1",
     object_id: `${source.part_number}^${revision}`,
@@ -7512,6 +8449,7 @@ function createRevisionRecord(source, revision) {
     work_instructions: source.work_instructions || [],
     file_links: source.file_links || [],
     tags: source.tags || [],
+    alternates: normalizeAlternateList(source.alternates || source.part_properties?.alternates),
     revisions: nextRevisionList(source.part_number, revision)
   };
   const part = {
@@ -7542,6 +8480,7 @@ function createRevisionRecord(source, revision) {
     updated_at: today,
     based_on: partKey(source),
     change_summary: "",
+    alternates: normalizeAlternateList(source.alternates || source.part_properties?.alternates),
     part_properties: partProperties,
     revision_properties: revisionProperties
   };
@@ -7579,12 +8518,12 @@ function structuredCloneSafe(value) {
   }
 }
 
-function nextRevisionForPart(source, { minor = false } = {}) {
+function nextRevisionForPart(source) {
   const currentRevision = typeof source === "string" ? latestRevisionForPart(source)?.revision : source?.revision;
   if (!currentRevision) {
     return "A";
   }
-  return minor ? incrementMinorRevisionLabel(currentRevision) : incrementMajorRevisionLabel(currentRevision);
+  return incrementMajorRevisionLabel(currentRevision);
 }
 
 function splitRevisionLabel(revision) {
@@ -7597,12 +8536,6 @@ function splitRevisionLabel(revision) {
 
 function incrementMajorRevisionLabel(revision) {
   return incrementAlphaLabel(splitRevisionLabel(revision).major);
-}
-
-function incrementMinorRevisionLabel(revision) {
-  const { major, minor } = splitRevisionLabel(revision);
-  const nextMinor = minor ? Number(minor) + 1 : 1;
-  return `${major}${String(nextMinor).padStart(2, "0")}`;
 }
 
 function incrementAlphaLabel(label) {
@@ -7623,6 +8556,10 @@ function importCsvFromPicker() {
 
 async function importPartsCsvFile(file) {
   if (!file) {
+    return;
+  }
+  if (!requireProfileForEdit("Complete your profile in Settings before importing product data.")) {
+    if (csvImportFile) csvImportFile.value = "";
     return;
   }
   try {
@@ -7653,7 +8590,10 @@ function importPartsCsvRows(rows) {
     throw new Error("CSV must include Part No, Name, and Project columns");
   }
 
-  const owner = localStorage.getItem("peakDefaultOwner") || "engineering@example.com";
+  const owner = currentEditorName();
+  if (!owner) {
+    throw new Error("Complete your profile in Settings before importing product data.");
+  }
   let created = 0;
   let skipped = 0;
   const skippedReasons = [];
@@ -8180,6 +9120,7 @@ function productPartProperties(partNumber, revisions) {
     project: representative.project,
     traceability: traceabilityValue(representative) || "LOT",
     maturity: representative.maturity || "development",
+    alternates: normalizeAlternateList(representative.alternates || representative.part_properties?.alternates),
     onshape: representative.onshape || [],
     work_instructions: representative.work_instructions || [],
     file_links: representative.file_links || [],
@@ -8211,7 +9152,7 @@ function productRevisionProperties(part) {
     updated_at: part.updated_at,
     based_on: part.based_on || null,
     approvers: part.approvers || [],
-    bom: part.bom || [],
+    bom: bomItemsForPersist(part.bom),
     attachments: part.attachments || part.documents || [],
     activity_history: activityHistoryForPart(part),
     workflow: part.revision_properties?.workflow || part.workflow || null,
