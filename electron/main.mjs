@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, shell, nativeTheme } from "electron";
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -8,6 +8,29 @@ const appUrl = `http://127.0.0.1:${port}/`;
 
 let runnerProcess;
 let mainWindow;
+
+function appearanceChrome(scheme = "dark") {
+  const light = scheme === "light";
+  return {
+    backgroundColor: light ? "#ffffff" : "#191919",
+    titleBarOverlay: {
+      color: light ? "#ffffff" : "#202020",
+      symbolColor: light ? "#37352f" : "#ffffff",
+      height: 40
+    }
+  };
+}
+
+function applyWindowAppearance(scheme = "dark") {
+  const light = scheme === "light";
+  nativeTheme.themeSource = light ? "light" : "dark";
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const chrome = appearanceChrome(scheme);
+  mainWindow.setBackgroundColor(chrome.backgroundColor);
+  if (process.platform !== "darwin" && typeof mainWindow.setTitleBarOverlay === "function") {
+    mainWindow.setTitleBarOverlay(chrome.titleBarOverlay);
+  }
+}
 
 function startRunner() {
   if (runnerProcess) {
@@ -38,24 +61,19 @@ function startRunner() {
 async function createWindow() {
   startRunner();
   const preloadPath = path.join(app.getAppPath(), "electron", "preload.cjs");
+  const chrome = appearanceChrome("dark");
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 960,
     minHeight: 720,
     title: "PEAK",
-    backgroundColor: "#191919",
+    backgroundColor: chrome.backgroundColor,
     autoHideMenuBar: true,
     titleBarStyle: "hidden",
     ...(process.platform === "darwin"
       ? { trafficLightPosition: { x: 14, y: 12 } }
-      : {
-          titleBarOverlay: {
-            color: "#202020",
-            symbolColor: "#ffffff",
-            height: 40
-          }
-        }),
+      : { titleBarOverlay: chrome.titleBarOverlay }),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -149,6 +167,11 @@ ipcMain.handle("peak:select-product-data-folder", async () => {
     path: folderPath,
     name: path.basename(folderPath)
   };
+});
+
+ipcMain.handle("peak:set-appearance", (_event, scheme) => {
+  applyWindowAppearance(scheme === "light" ? "light" : "dark");
+  return true;
 });
 
 app.on("activate", () => {

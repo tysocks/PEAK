@@ -35,6 +35,8 @@ const settingsModalBody = document.querySelector("#settingsModalBody");
 const alternateModal = document.querySelector("#alternateModal");
 const alternateSearchInput = document.querySelector("#alternateSearchInput");
 const alternateModalList = document.querySelector("#alternateModalList");
+const workflowModal = document.querySelector("#workflowModal");
+const workflowModalBody = document.querySelector("#workflowModalBody");
 const searchModal = document.querySelector("#searchModal");
 const searchModalList = document.querySelector("#searchModalList");
 const searchModalPreview = document.querySelector("#searchModalPreview");
@@ -85,6 +87,7 @@ let activeTableSort = { column: "part_number", direction: "asc" };
 let tableColumnFilters = {};
 let collapsedBomNodes = new Set();
 let bomPickerTargetId = "";
+let bomAlternateViewByLine = new Map();
 let alternateEditDraft = null;
 let attachmentEditDraft = null;
 let activeBomPaneWidthRatio = loadBomPaneWidthRatio();
@@ -106,6 +109,7 @@ let activeAccentColor = "notion";
 let activeAccentCustomHex = "#6f6f6f";
 let statusMessage = "";
 let workflowFeedback = {};
+let workflowTransitionDraft = null;
 let githubAuthStatus = null;
 let githubAuthChecking = false;
 let githubAuthPollingTimer = null;
@@ -199,6 +203,9 @@ function applyAppearance(scheme) {
   document.body.style.removeProperty("--accent");
   document.body.style.removeProperty("--accent-soft");
   document.body.style.removeProperty("--selected");
+  if (typeof window.peakDesktop?.setAppearance === "function") {
+    window.peakDesktop.setAppearance(mode).catch(() => {});
+  }
 }
 
 applyAppearance(activeColorScheme);
@@ -715,38 +722,77 @@ function projectBomForest(projectName) {
   return { byPartNumber, childMap, roots };
 }
 
-function renderProjectBomNode(partNumber, forest, depth, visited, projectName) {
-  const part = forest.byPartNumber.get(partNumber);
+function renderProjectBomNode(partNumber, forest, depth, visited, projectName, claimedNumbers = null) {
+  const claimed = claimedNumbers || new Set();
+  const canon = canonicalPartNumber(partNumber);
+  if (!canon || claimed.has(canon) || visited.has(canon)) {
+    return "";
+  }
+  const part = forest.byPartNumber.get(partNumber) || forest.byPartNumber.get(canon);
   if (!part) {
     return "";
   }
-  const key = partKey(part);
-  const active = activeNavMode === "part" && openedPartNumber === key;
-  const children = (forest.childMap.get(partNumber) || []).filter((childPn) => !visited.has(childPn) && childPn !== partNumber);
-  const hasChildren = children.length > 0;
-  const nodeId = sidebarBomNodeId(projectName, partNumber);
-  const expanded = hasChildren && expandedSidebarBomNodes.has(nodeId);
-  const nextVisited = new Set(visited);
-  nextVisited.add(partNumber);
-  const childHtml = expanded
-    ? children
-      .map((childPn) => renderProjectBomNode(childPn, forest, depth + 1, nextVisited, projectName))
-      .join("")
-    : "";
-  const twist = hasChildren
-    ? `<button class="twist sidebarBomTwist${expanded ? " expanded" : ""}" type="button" data-toggle-sidebar-bom="${escapeHtml(nodeId)}" title="${expanded ? "Collapse" : "Expand"}" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(part.part_number)}" aria-expanded="${expanded}"></button>`
-    : `<span class="twistSpacer" aria-hidden="true"></span>`;
-  return `
-    <div class="sidebarBomNode">
-      <div class="sidebarBomRow">
-        ${twist}
-        <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-part="${escapeHtml(key)}">
-          <span class="sidebarItemLabel">${escapeHtml(part.part_number)} · ${escapeHtml(part.name)}</span>
-        </button>
+
+  const groupParts = [];
+  const groupSeen = new Set();
+  for (const candidate of approvedAlternateGroup(part)) {
+    const number = canonicalPartNumber(candidate.part_number);
+    if (!number || groupSeen.has(number) || claimed.has(number)) continue;
+    const inForest = forest.byPartNumber.get(number);
+    const resolved = inForest || (candidate.project === projectName ? candidate : null);
+    if (!resolved) continue;
+    groupSeen.add(number);
+    groupParts.push(resolved);
+  }
+  if (!groupParts.length) {
+    groupParts.push(part);
+    groupSeen.add(canon);
+  }
+
+  groupParts.forEach((peer) => claimed.add(canonicalPartNumber(peer.part_number)));
+  const hasAlternates = groupParts.length > 1;
+
+  return groupParts.map((peer) => {
+    const peerCanon = canonicalPartNumber(peer.part_number);
+    const key = partKey(peer);
+    const active = activeNavMode === "part" && openedPartNumber === key;
+    const children = (forest.childMap.get(peer.part_number) || forest.childMap.get(peerCanon) || [])
+      .filter((childPn) => {
+        const childCanon = canonicalPartNumber(childPn);
+        return childCanon
+          && !visited.has(childCanon)
+          && childCanon !== peerCanon
+          && !groupSeen.has(childCanon);
+      });
+    const hasChildren = children.length > 0;
+    const nodeId = sidebarBomNodeId(projectName, peer.part_number);
+    const expanded = hasChildren && expandedSidebarBomNodes.has(nodeId);
+    const nextVisited = new Set(visited);
+    nextVisited.add(peerCanon);
+    const childHtml = expanded
+      ? children
+        .map((childPn) => renderProjectBomNode(childPn, forest, depth + 1, nextVisited, projectName, claimed))
+        .join("")
+      : "";
+    const twist = hasChildren
+      ? `<button class="twist sidebarBomTwist${expanded ? " expanded" : ""}" type="button" data-toggle-sidebar-bom="${escapeHtml(nodeId)}" title="${expanded ? "Collapse" : "Expand"}" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeHtml(peer.part_number)}" aria-expanded="${expanded}"></button>`
+      : `<span class="twistSpacer" aria-hidden="true"></span>`;
+    const swap = hasAlternates
+      ? `<span class="alternateSwapIcon" title="Approved alternate" aria-hidden="true"></span>`
+      : "";
+    return `
+      <div class="sidebarBomNode">
+        <div class="sidebarBomRow">
+          ${twist}
+          <button class="sidebarItem${active ? " active" : ""}" type="button" data-open-part="${escapeHtml(key)}">
+            <span class="sidebarItemLabel">${escapeHtml(peer.part_number)} · ${escapeHtml(peer.name)}</span>
+            ${swap}
+          </button>
+        </div>
+        ${hasChildren ? `<div class="sidebarChildren${expanded ? " open" : ""}">${childHtml}</div>` : ""}
       </div>
-      ${hasChildren ? `<div class="sidebarChildren${expanded ? " open" : ""}">${childHtml}</div>` : ""}
-    </div>
-  `;
+    `;
+  }).join("");
 }
 
 function renderProjectsTree() {
@@ -774,7 +820,10 @@ function renderProjectsTree() {
         <div class="sidebarChildren${expanded ? " open" : ""}">
           ${expanded
             ? (forest.roots.length
-              ? forest.roots.map((partNumber) => renderProjectBomNode(partNumber, forest, 0, new Set(), project)).join("")
+              ? (() => {
+                  const claimed = new Set();
+                  return forest.roots.map((partNumber) => renderProjectBomNode(partNumber, forest, 0, new Set(), project, claimed)).join("");
+                })()
               : `<p class="sidebarEmpty">No parts</p>`)
             : ""}
         </div>
@@ -1142,7 +1191,7 @@ function renderSearchFilterPickerOptions() {
             ? ((alternateEditDraft || []).find((row) => row.id === bomPickerTargetId)?.partNumber || "")
           : (() => {
               const owner = findBomItemOwner(bomPickerTargetId);
-              const child = resolveBomChild(owner?.item);
+              const child = resolveBomChild(owner?.item, { forDisplay: true });
               return child?.part_number || "";
             })();
   searchFilterPickerList.innerHTML = filtered.length
@@ -1985,7 +2034,7 @@ function pageDescription() {
   const descriptions = {
     home: "Search all parts across every project.",
     create: "Create draft parts, revisions, and projects.",
-    projects: "Browse project folders, owners, approvers, and part counts.",
+    projects: "Browse project folders, owners, and part counts.",
     table: "Review every part revision and property in a sortable table.",
     settings: "Configure local PEAK behavior for this workstation."
   };
@@ -2487,16 +2536,9 @@ function renderCreateProjectRows() {
           <div class="createFormField">
             <div class="createFormMeta">
               <label class="createFormLabel" for="newProjectOwner">Owner</label>
-              <span class="createFormHint">Default engineering owner email</span>
+              <span class="createFormHint">Default engineering owner</span>
             </div>
             <input class="tableInput createFormInput" id="newProjectOwner" value="${escapeHtml(currentEditorName() || "")}">
-          </div>
-          <div class="createFormField">
-            <div class="createFormMeta">
-              <label class="createFormLabel" for="newProjectApprovers">Approvers</label>
-              <span class="createFormHint">Comma-separated approver names</span>
-            </div>
-            <input class="tableInput createFormInput" id="newProjectApprovers" value="" placeholder="Name, name">
           </div>
           <div class="createFormField">
             <div class="createFormMeta">
@@ -2622,7 +2664,6 @@ function renderProjectDetailBody(project) {
     ? [
         propertyProjectEditInline("Project Code", "key", projectKey(project)),
         propertyProjectEditInline("Owner", "owner", projectOwner(project)),
-        propertyProjectEditInline("Approvers", "approvers", projectApprovers(project).join(", ")),
         propertyProjectEditInline("Google Drive Link", "drive_url", projectDriveUrl(project)),
         propertyProjectToggleInline("Allow Custom Part Numbers", "allow_custom_part_numbers", projectAllowsCustomPartNumbers(project)),
         propertyProjectEditInline("Description", "description", projectDescription(project), { textarea: true })
@@ -2630,7 +2671,6 @@ function renderProjectDetailBody(project) {
     : [
         assignedProperty("Project Code", projectKey(project)),
         assignedProperty("Owner", projectOwner(project)),
-        assignedProperty("Approvers", projectApprovers(project).join(", ")),
         assignedProperty("Allow Custom Part Numbers", projectAllowsCustomPartNumbers(project) ? "Yes" : "No"),
         assignedProperty("Description", projectDescription(project))
       ].filter(Boolean);
@@ -3212,6 +3252,7 @@ function renderPartOptionsMenu(part) {
       <div class="partOptionsMenuBody">
         ${partOptionItem("Copy Item ID", "copy-item-id", { icon: "copy-id" })}
         ${partOptionItem("Copy Item Contents", "copy-item-contents", { icon: "copy" })}
+        ${partOptionItem("Copy BOM Structure", "copy-bom-structure", { icon: "copy", title: "Copy the currently rendered BOM table, including selected alternates" })}
         ${partOptionItem("Refresh Remote", "refresh-remote", { icon: "refresh", title: "Pull the latest remote into the local repository" })}
         <div class="partOptionsDivider" role="separator"></div>
         ${partOptionItem("Edit Item", "edit-part", { icon: "edit", disabled: !canEdit, active: activePartEditMode })}
@@ -3245,10 +3286,13 @@ function workflowMenuAction(transition, rule, label, workflow, part, { danger = 
   if (!transition && !alwaysShow) return "";
   const feedback = workflowFeedbackFor(workflow, part);
   const isRunning = feedback?.state === "running";
-  const enabled = Boolean(transition) && Boolean(rule?.ready) && !isRunning;
+  const enabled = Boolean(transition) && !isRunning;
   const to = transition?.to || "";
   const display = isRunning ? "Working..." : label;
-  return `<button class="partOptionItem${danger ? " danger" : ""}" type="button" role="menuitem" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(to)}"${enabled ? "" : " disabled"}${title ? ` title="${escapeHtml(title)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(display)}</span></button>`;
+  const blockedTitle = transition && rule && !rule.ready
+    ? "View prerequisites for this transition"
+    : title;
+  return `<button class="partOptionItem${danger ? " danger" : ""}" type="button" role="menuitem" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}" data-workflow-action="${escapeHtml(workflow)}" data-workflow-to="${escapeHtml(to)}"${enabled ? "" : " disabled"}${blockedTitle ? ` title="${escapeHtml(blockedTitle)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(display)}</span></button>`;
 }
 
 function filterPartOptionsMenu(query = partOptionsSearchQuery) {
@@ -3333,7 +3377,7 @@ function renderCombinedPartDetails(part) {
   const onshapeUrl = documentUrl(part, "onshape");
   const workUrl = documentUrl(part, "work");
   const basedOnValue = part.based_on || part.based_on_part_number || part.copied_from || "";
-  const approversValue = (part.approvers ?? []).map((approver) => approver.name || approver).filter(Boolean).join(", ");
+  const approverValue = revisionApprover(part);
   const costValue = optionalPartPropertyValue(part, "cost");
   const massValue = optionalPartPropertyValue(part, "mass");
   const traceability = traceabilityValue(part);
@@ -3350,7 +3394,7 @@ function renderCombinedPartDetails(part) {
         propertyEditInline("Google Drive Link", "driveUrl", driveUrl),
         propertyEditInline("Onshape Link", "onshapeUrl", onshapeUrl),
         propertyEditInline("Work Instructions Link", "workUrl", workUrl),
-        propertyEditInline("Approvers", "approvers", approversValue)
+        property("Approver", approverValue || "Set when released")
       ]
     : [
         assignedProperty("Description", part.description),
@@ -3361,7 +3405,7 @@ function renderCombinedPartDetails(part) {
         assignedProperty("Cost", costValue),
         assignedProperty("Mass", massValue),
         assignedPropertyHtml("Based On", basedOnLink(part), basedOnValue),
-        assignedProperty("Approvers", approversValue)
+        assignedProperty("Approver", approverValue)
       ].filter(Boolean);
 
   return `
@@ -3629,7 +3673,7 @@ function renderOverviewTab(part) {
         ])}
         ${editing ? detailSection("Workflow", [
           property("Part Maturity", maturityStageLabel(part)),
-          propertyEditInline("Approvers", "approvers", (part.approvers ?? []).map((approver) => approver.name || approver).join(", "))
+          property("Approver", revisionApprover(part) || "Set when released")
         ]) : ""}
       </div>
       <div class="overviewColumn">
@@ -3790,7 +3834,7 @@ function renderWorkflowTab(part) {
       ], part)}
       ${workflowFeedbackMessage("revision", part)}
     </section>
-    ${referenceSection("Approvers", part.approvers ?? [], approverReference)}
+    ${revisionApprover(part) ? detailSection("Approver", [property("Approver", revisionApprover(part))]) : ""}
   `;
 }
 
@@ -4675,6 +4719,24 @@ function alternatePartsFor(part) {
     .filter(Boolean);
 }
 
+function approvedAlternateGroup(part) {
+  if (!part) return [];
+  const seen = new Set();
+  const group = [];
+  const candidates = [part, ...alternatePartsFor(part)];
+  for (const candidate of candidates) {
+    const number = canonicalPartNumber(candidate?.part_number);
+    if (!number || seen.has(number)) continue;
+    seen.add(number);
+    group.push(candidate);
+  }
+  return group;
+}
+
+function hasApprovedAlternates(part) {
+  return approvedAlternateGroup(part).length > 1;
+}
+
 function renderApprovedAlternates(part) {
   const rows = alternatePartsFor(part);
   if (!rows.length) return "";
@@ -5057,9 +5119,11 @@ function referenceSection(title, records, renderer) {
 }
 
 function bomReference(item) {
-  const child = resolveBomChild(item);
+  const child = resolveBomChild(item, { forDisplay: true });
   const childId = child ? partKey(child) : item.child_object_id || item.child_part_number;
-  const childLabel = item.child_revision ? `${item.child_part_number}^${item.child_revision}` : item.child_part_number;
+  const childLabel = child
+    ? (child.revision ? `${child.part_number}^${child.revision}` : child.part_number)
+    : (item.child_revision ? `${item.child_part_number}^${item.child_revision}` : item.child_part_number);
   return `
     <article class="reference">
       <strong><button class="linkButton" type="button" data-part-number="${escapeHtml(childId)}">${escapeHtml(childLabel)}</button></strong>
@@ -5150,9 +5214,21 @@ function bomItemUsesPart(item, part) {
   return child ? partKey(child) === targetKey : true;
 }
 
-function resolveBomChild(item) {
+function bomLineViewKey(item) {
+  if (!item || isBlankBomItem(item)) return "";
+  return String(item.child_object_id || `${item.child_part_number || ""}^${item.child_revision || ""}` || item.child_part_number || "").trim();
+}
+
+function resolveBomChild(item, { forDisplay = false } = {}) {
   if (!item || isBlankBomItem(item)) {
     return undefined;
+  }
+  if (forDisplay) {
+    const viewKey = bomLineViewKey(item);
+    const overrideNumber = viewKey ? bomAlternateViewByLine.get(viewKey) : "";
+    if (overrideNumber) {
+      return latestRevisionForPart(overrideNumber) || findPartByKey(overrideNumber);
+    }
   }
   if (item.child_object_id) {
     return findPartByKey(item.child_object_id);
@@ -5161,6 +5237,11 @@ function resolveBomChild(item) {
     return findPartByKey(`${item.child_part_number}^${item.child_revision}`);
   }
   return latestRevisionForPart(item.child_part_number) || findPartByKey(item.child_part_number);
+}
+
+function clearBomAlternateViewForItem(item) {
+  const key = bomLineViewKey(item);
+  if (key) bomAlternateViewByLine.delete(key);
 }
 
 function isBlankBomItem(item) {
@@ -5247,12 +5328,15 @@ function renderBomTree() {
   }
 
   const childRows = renderBomChildren(rootPart, 1, new Set([partKey(rootPart)]));
+  const rootSwap = hasApprovedAlternates(rootPart)
+    ? `<button class="alternateSwapButton" type="button" data-cycle-bom-alternate="root" data-bom-alternate-target="${escapeHtml(partKey(rootPart))}" title="Cycle approved alternate" aria-label="Cycle approved alternate"></button>`
+    : "";
   navigationTree.innerHTML = `
     <div class="bomGrid" role="treegrid" aria-label="BOM Structure">
       ${renderBomHeader()}
-      <button class="treeNode bomNode root${selectedBomPartNumber === partKey(rootPart) ? " active" : ""}" type="button" data-bom-part-number="${escapeHtml(partKey(rootPart))}" role="row">
-        ${renderBomRowCells({ type: "root", part: rootPart })}
-      </button>
+      <div class="treeNode bomNode root${selectedBomPartNumber === partKey(rootPart) ? " active" : ""}" data-bom-part-number="${escapeHtml(partKey(rootPart))}" role="row">
+        ${renderBomRowCells({ type: "root", part: rootPart, swap: rootSwap })}
+      </div>
       ${childRows || (!activePartEditMode ? '<div class="treeEmpty">No child components</div>' : "")}
       ${activePartEditMode ? renderBomNewRow() : ""}
     </div>
@@ -5270,10 +5354,20 @@ function renderBomHeader() {
   `;
 }
 
-function renderBomRowCells({ type, part, item, child, childId, toggle = "", editable = false }) {
+function renderBomRowCells({ type, part, item, child, childId, toggle = "", editable = false, swap = "" }) {
+  const swapSlot = `<span class="bomSwapSlot">${swap || ""}</span>`;
   return activeBomColumnOrder.map((key) => {
     if (key === "item") {
-      if (type === "root") return `<span class="bomItem bomItemCell">${escapeHtml(part.part_number)}</span>`;
+      if (type === "root") {
+        return `
+          <div class="bomItem bomItemCell">
+            ${swapSlot}
+            <div class="bomItemMain">
+              <span class="bomItemText">${escapeHtml(part.part_number)}</span>
+            </div>
+          </div>
+        `;
+      }
       if (editable) {
         const blank = isBlankBomItem(item);
         const label = blank
@@ -5284,15 +5378,26 @@ function renderBomRowCells({ type, part, item, child, childId, toggle = "", edit
           : `<span class="bomDragHandle" draggable="true" data-bom-drag="${escapeHtml(childId)}" title="Drag to reorder" aria-label="Drag to reorder"></span>`;
         return `
           <div class="bomItem bomItemCell">
-            ${dragHandle}
-            ${toggle}
-            <button class="bomItemSelectBtn${blank ? " is-placeholder" : ""}" type="button" data-filter-picker="bomItem" data-bom-pick-item="${escapeHtml(childId)}" aria-haspopup="listbox" aria-expanded="false" title="Select item">
-              ${escapeHtml(label)}
-            </button>
+            ${swapSlot}
+            <div class="bomItemMain">
+              ${dragHandle}
+              ${toggle}
+              <button class="bomItemSelectBtn${blank ? " is-placeholder" : ""}" type="button" data-filter-picker="bomItem" data-bom-pick-item="${escapeHtml(childId)}" aria-haspopup="listbox" aria-expanded="false" title="Select item">
+                ${escapeHtml(label)}
+              </button>
+            </div>
           </div>
         `;
       }
-      return `<div class="bomItem bomItemCell">${toggle}<button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child?.part_number || item.child_part_number)}</button></div>`;
+      return `
+        <div class="bomItem bomItemCell">
+          ${swapSlot}
+          <div class="bomItemMain">
+            ${toggle}
+            <button class="linkButton" type="button" data-bom-part-number="${escapeHtml(childId)}">${escapeHtml(child?.part_number || item.child_part_number)}</button>
+          </div>
+        </div>
+      `;
     }
     if (key === "name") {
       if (isBlankBomItem(item)) return '<span class="bomName bomPlaceholder">—</span>';
@@ -5325,7 +5430,7 @@ function renderBomChildren(parentPart, depth, visited) {
   return (parentPart.bom ?? [])
     .map((item) => {
       const blank = isBlankBomItem(item);
-      const child = resolveBomChild(item);
+      const child = resolveBomChild(item, { forDisplay: true });
       const childId = blank
         ? item.child_object_id
         : (child ? partKey(child) : item.child_object_id || item.child_part_number);
@@ -5341,16 +5446,19 @@ function renderBomChildren(parentPart, depth, visited) {
       const toggle = hasChildren
         ? `<button class="bomCollapseButton${collapsed ? " collapsed" : ""}" type="button" data-toggle-bom-collapse="${escapeHtml(childId)}" title="${collapsed ? "Expand subassembly" : "Collapse subassembly"}" aria-label="${collapsed ? "Expand subassembly" : "Collapse subassembly"}"></button>`
         : '<span class="bomCollapseSpacer" aria-hidden="true"></span>';
+      const swap = !blank && hasApprovedAlternates(child)
+        ? `<button class="alternateSwapButton" type="button" data-cycle-bom-alternate="${escapeHtml(childId)}" title="Cycle approved alternate" aria-label="Cycle approved alternate"></button>`
+        : "";
 
       const row = canEditThisItem
           ? `
           <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}${blank ? " bomBlankRow" : ""}" data-bom-part-number="${escapeHtml(childId)}" role="row">
-            ${renderBomRowCells({ type: "child", item, child, childId, toggle, editable: true })}
+            ${renderBomRowCells({ type: "child", item, child, childId, toggle, editable: true, swap })}
           </div>
         `
         : `
           <div class="treeNode bomNode child depth${Math.min(depth, 4)}${active}" data-bom-part-number="${escapeHtml(childId)}" role="row">
-            ${renderBomRowCells({ type: "child", item, child, childId, toggle })}
+            ${renderBomRowCells({ type: "child", item, child, childId, toggle, swap })}
           </div>
         `;
       return `${row}${children}`;
@@ -6117,10 +6225,16 @@ partDetail.addEventListener("click", (event) => {
     if (!requireProfileForEdit()) return;
     partOptionsMenuOpen = false;
     partOptionsSearchQuery = "";
-    runWorkflowTransition(workflowButton.dataset.workflowAction, workflowButton.dataset.workflowTo).catch((error) => {
-      statusMessage = `Workflow transition failed: ${error.message}`;
-      renderApp();
-    });
+    const workflow = workflowButton.dataset.workflowAction;
+    const target = workflowButton.dataset.workflowTo;
+    if (target === "delete") {
+      runWorkflowTransition(workflow, target).catch((error) => {
+        statusMessage = `Workflow transition failed: ${error.message}`;
+        renderApp();
+      });
+      return;
+    }
+    openWorkflowTransitionModal(workflow, target);
     return;
   }
 
@@ -6295,6 +6409,12 @@ function handlePartAction(action) {
     copyItemContents(part);
     return;
   }
+  if (action === "copy-bom-structure") {
+    partOptionsMenuOpen = false;
+    partOptionsSearchQuery = "";
+    copyBomStructure(getOpenedPart() || part);
+    return;
+  }
   if (action === "create-from-source") {
     if (!requireProfileForEdit()) return;
     partOptionsMenuOpen = false;
@@ -6394,23 +6514,134 @@ function handleTabularAction(action) {
   }
 }
 
-async function runWorkflowTransition(workflow, target) {
+function revisionApprover(part) {
+  if (!part) return "";
+  if (part.approver) return String(part.approver).trim();
+  if (part.revision_properties?.approver) return String(part.revision_properties.approver).trim();
+  const legacy = asArray(part.approvers)[0];
+  return String(legacy?.name || legacy || "").trim();
+}
+
+function workflowApproverDefault(part) {
+  return projectOwner(part?.project) || currentEditorName() || "";
+}
+
+function openWorkflowTransitionModal(workflow, target) {
+  const part = getSelectedBomPart() || getOpenedPart() || findPartByKey(selectedPartNumber);
+  if (!part || !target || !workflowModal || !workflowModalBody) return;
+  const transition = workflow === "maturity"
+    ? nextMaturityTransition(part)
+    : target === "draft" && revisionStatusValue(part) === "release_candidate"
+      ? { to: "draft", mode: "direct", action: "revert" }
+      : nextRevisionTransition(part);
+  if (!transition || transition.to !== target) {
+    statusMessage = `No ${workflow} transition available to ${target}.`;
+    renderApp();
+    return;
+  }
+  const rule = workflow === "maturity"
+    ? maturityWorkflowRule(part, target)
+    : revisionWorkflowRule(part, target);
+  const requester = currentEditorLabel() || currentEditorName() || "Not set";
+  const defaultApprover = workflowApproverDefault(part);
+  workflowTransitionDraft = {
+    workflow,
+    target,
+    mode: transition.mode || "direct",
+    partKey: partKey(part),
+    approver: defaultApprover
+  };
+  const titleEl = document.querySelector("#workflowModalTitle");
+  const fromLabel = workflow === "maturity" ? maturityStageLabel(part) : releaseStatusLabel(part);
+  const toLabel = workflow === "maturity" ? maturityStageText(target) : revisionStatusText(target);
+  if (titleEl) {
+    titleEl.textContent = `${fromLabel} → ${toLabel}`;
+  }
+  const trackerHtml = workflow === "maturity"
+    ? workflowPillTrack(maturityWorkflowStates, target, maturityStageText)
+    : workflowPillTrack(revisionWorkflowStates, target, revisionStatusText);
+  const criteriaHtml = (rule.criteria || []).map((item) => `
+    <li class="workflowPrereqItem${item.met ? " is-met" : " is-blocked"}">
+      <span class="workflowPrereqMark" aria-hidden="true">${item.met ? "✓" : "○"}</span>
+      <span>${escapeHtml(item.label)}</span>
+    </li>
+  `).join("") || `<li class="workflowPrereqItem is-met"><span class="workflowPrereqMark" aria-hidden="true">✓</span><span>No prerequisites</span></li>`;
+  const needsApprover = transition.mode === "mr" || target === "released";
+  const confirmTitle = rule.ready
+    ? (transition.mode === "mr" ? "Create Merge Request" : "Confirm Transition")
+    : "Complete all prerequisites first";
+  workflowModalBody.innerHTML = `
+    <div class="workflowModalTracker">${trackerHtml}</div>
+    <section class="workflowModalSection">
+      <h3>Prerequisites</h3>
+      <ul class="workflowPrereqList">${criteriaHtml}</ul>
+    </section>
+    <section class="workflowModalSection">
+      <h3>Users</h3>
+      <dl class="workflowPeopleGrid">
+        <dt>Requested by</dt>
+        <dd>${escapeHtml(requester)}</dd>
+        ${needsApprover ? `
+          <dt><label for="workflowApproverInput">Approver</label></dt>
+          <dd>
+            <input class="tableInput" id="workflowApproverInput" data-workflow-approver value="${escapeHtml(defaultApprover)}" placeholder="Approver name">
+            ${target === "released" ? `<p class="settingsFieldHint">Saved on this revision when released.</p>` : ""}
+          </dd>
+        ` : `
+          <dt>Approver</dt>
+          <dd>Not required for this direct transition</dd>
+        `}
+      </dl>
+    </section>
+    <div class="workflowModalActions">
+      <button class="createSubmitIcon workflowConfirmIcon" type="button" data-confirm-workflow-transition${rule.ready ? "" : " disabled"} title="${escapeHtml(confirmTitle)}" aria-label="${escapeHtml(confirmTitle)}"></button>
+    </div>
+  `;
+  workflowModal.hidden = false;
+}
+
+function closeWorkflowTransitionModal() {
+  if (workflowModal) workflowModal.hidden = true;
+  workflowTransitionDraft = null;
+  if (workflowModalBody) workflowModalBody.innerHTML = "";
+}
+
+function confirmWorkflowTransitionFromModal() {
+  if (!workflowTransitionDraft) return;
+  const approverInput = document.querySelector("[data-workflow-approver]");
+  if (approverInput) {
+    workflowTransitionDraft.approver = approverInput.value.trim();
+  }
+  const { workflow, target, partKey: key, approver } = workflowTransitionDraft;
+  if ((target === "released" || workflowTransitionDraft.mode === "mr") && !approver) {
+    statusMessage = "Approver is required for this transition";
+    renderApp();
+    return;
+  }
+  closeWorkflowTransitionModal();
+  runWorkflowTransition(workflow, target, { approver }).catch((error) => {
+    statusMessage = `Workflow transition failed: ${error.message}`;
+    renderApp();
+  });
+}
+
+async function runWorkflowTransition(workflow, target, { approver = "" } = {}) {
   const part = getSelectedBomPart() || getOpenedPart() || findPartByKey(selectedPartNumber);
   if (!part || !target) {
     return;
   }
 
   if (workflow === "revision") {
-    await transitionRevisionWorkflow(part, target);
+    await transitionRevisionWorkflow(part, target, { approver });
     return;
   }
 
   if (workflow === "maturity") {
-    await transitionMaturityWorkflow(part, target);
+    await transitionMaturityWorkflow(part, target, { approver });
   }
 }
 
-async function transitionRevisionWorkflow(part, target) {
+async function transitionRevisionWorkflow(part, target, { approver = "" } = {}) {
   const transition =
     target === "draft" && revisionStatusValue(part) === "release_candidate"
       ? { to: "draft", mode: "direct", action: "revert" }
@@ -6432,6 +6663,7 @@ async function transitionRevisionWorkflow(part, target) {
   const label = partObjectLabel(part);
   const title = transition.mode === "mr" ? revisionWorkflowMrTitle(part, target) : target === "delete" ? `Delete ${label}` : `Set ${label} to ${revisionStatusText(target)}`;
   const performedAt = activityTimestamp();
+  const releaseApprover = target === "released" ? (approver || workflowApproverDefault(part)) : "";
   let files;
   let deletePaths = [];
   if (transition.mode === "direct") {
@@ -6439,7 +6671,7 @@ async function transitionRevisionWorkflow(part, target) {
       deletePaths = productDataDeletePathsForRevision(part);
       deleteDraftRevision(part, performedAt);
     } else {
-      stampPartRevision(part, target);
+      stampPartRevision(part, target, { approver: releaseApprover });
       appendPartActivity(part, "updated_revision", `${label} revision status changed to ${revisionStatusText(target)}`, { performedAt });
       part.workflow = revisionWorkflowRecord(part, target, transition.mode, null);
       part.revision_properties = {
@@ -6457,7 +6689,7 @@ async function transitionRevisionWorkflow(part, target) {
     if (!(await ensureGitHubReadyForMergeRequest("revision", part))) {
       return;
     }
-    const proposedParts = proposedRevisionWorkflowParts(part, target, transition.mode, performedAt);
+    const proposedParts = proposedRevisionWorkflowParts(part, target, transition.mode, performedAt, { approver: releaseApprover || approver });
     statusMessage = `${label} proposed for ${revisionStatusText(target)}; creating merge request "${title}".`;
     setWorkflowFeedback("revision", part, "running", `Creating merge request "${title}"...`);
     files = productDataSnapshotFiles(proposedParts);
@@ -6471,11 +6703,12 @@ async function transitionRevisionWorkflow(part, target) {
     target,
     part,
     files,
-    deletePaths
+    deletePaths,
+    approver: releaseApprover || approver || ""
   });
 }
 
-async function transitionMaturityWorkflow(part, target) {
+async function transitionMaturityWorkflow(part, target, { approver = "" } = {}) {
   const transition = nextMaturityTransition(part);
   if (!transition || transition.to !== target) {
     statusMessage = `Cannot transition ${part.part_number} to ${maturityStageText(target)} from ${maturityStageLabel(part)}.`;
@@ -6503,7 +6736,8 @@ async function transitionMaturityWorkflow(part, target) {
     label: `${part.part_number} maturity ${maturityStageText(target)}`,
     target,
     part,
-    files
+    files,
+    approver: approver || workflowApproverDefault(part)
   });
 }
 
@@ -6519,13 +6753,13 @@ async function ensureGitHubReadyForMergeRequest(workflow, part) {
   return false;
 }
 
-function proposedRevisionWorkflowParts(part, target, mode, performedAt = activityTimestamp()) {
+function proposedRevisionWorkflowParts(part, target, mode, performedAt = activityTimestamp(), { approver = "" } = {}) {
   const proposedParts = structuredCloneSafe(parts);
   const proposedPart = proposedParts.find((candidate) => partKey(candidate) === partKey(part));
   if (!proposedPart) {
     return proposedParts;
   }
-  stampPartRevision(proposedPart, target);
+  stampPartRevision(proposedPart, target, { approver });
   appendPartActivity(proposedPart, "updated_revision", `${partObjectLabel(proposedPart)} revision status changed to ${revisionStatusText(target)}`, { performedAt });
   proposedPart.workflow = revisionWorkflowRecord(proposedPart, target, mode, mode === "mr" ? revisionWorkflowMrTitle(proposedPart, target) : null);
   proposedPart.revision_properties = {
@@ -6611,19 +6845,24 @@ function maturityWorkflowRecord(part, status) {
   };
 }
 
-function stampPartRevision(part, status) {
+function stampPartRevision(part, status, { approver = "" } = {}) {
   const editor = currentEditorName();
   const today = new Date().toISOString().slice(0, 10);
   part.release_status = status;
   part.updated_by = editor;
   part.owner = editor;
   part.updated_at = today;
+  if (status === "released" && approver) {
+    part.approver = approver;
+    part.approvers = [{ name: approver, role: "approver", status: "approved", date: today }];
+  }
   part.revision_properties = {
     ...(part.revision_properties || {}),
     release_status: status,
     owner: part.owner,
     updated_by: part.updated_by,
-    updated_at: part.updated_at
+    updated_at: part.updated_at,
+    ...(part.approver ? { approver: part.approver } : {})
   };
   delete part.revision_properties.lifecycle_state;
 }
@@ -6684,11 +6923,107 @@ async function copyItemContents(part) {
   renderApp();
 }
 
+function collectRenderedBomStructureRows(rootPart) {
+  const rows = [];
+  if (!rootPart) return rows;
+
+  const pushPartRow = (part, quantity, depth) => {
+    rows.push({
+      depth,
+      item: part?.part_number || "",
+      name: part?.name || "External component",
+      quantity: quantity ?? 1,
+      revision: part?.revision || "—",
+      status: part ? releaseStatusLabel(part) : "Not found"
+    });
+  };
+
+  pushPartRow(rootPart, 1, 0);
+
+  const walk = (parentPart, depth, visited) => {
+    for (const item of asArray(parentPart?.bom)) {
+      if (isBlankBomItem(item)) continue;
+      const child = resolveBomChild(item, { forDisplay: true });
+      const childId = child ? partKey(child) : item.child_object_id || item.child_part_number;
+      if (child) {
+        pushPartRow(child, item.quantity ?? 1, depth);
+      } else {
+        rows.push({
+          depth,
+          item: item.child_part_number || "",
+          name: "External component",
+          quantity: item.quantity ?? 1,
+          revision: item.child_revision || "—",
+          status: "Not found"
+        });
+      }
+      const hasChildren = Boolean(child?.bom?.length);
+      const collapsed = hasChildren && collapsedBomNodes.has(childId);
+      if (child && hasChildren && !collapsed && !visited.has(partKey(child))) {
+        walk(child, depth + 1, new Set([...visited, partKey(child)]));
+      }
+    }
+  };
+
+  walk(rootPart, 1, new Set([partKey(rootPart)]));
+  return rows;
+}
+
+function formatBomStructureTable(rows) {
+  const columns = activeBomColumnOrder.length ? activeBomColumnOrder : bomDefaultColumnOrder;
+  const headers = ["Level", ...columns.map((key) => bomColumnDefinitions[key]?.label || key)];
+  const body = rows.map((row) => [
+    String(row.depth ?? 0),
+    ...columns.map((key) => {
+      if (key === "item") return row.item || "";
+      if (key === "name") return row.name || "";
+      if (key === "quantity") return String(row.quantity ?? "");
+      if (key === "revision") return row.revision || "";
+      if (key === "status") return row.status || "";
+      return "";
+    })
+  ]);
+  const escapeCell = (value) => {
+    const text = String(value ?? "");
+    return /[\t\n\r"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [headers, ...body].map((line) => line.map(escapeCell).join("\t")).join("\n");
+}
+
+async function copyBomStructure(part) {
+  const rootPart = getOpenedPart() || part;
+  if (!rootPart) {
+    statusMessage = "No part open to copy BOM structure";
+    renderApp();
+    return;
+  }
+  const rows = collectRenderedBomStructureRows(rootPart);
+  const text = formatBomStructureTable(rows);
+  try {
+    await navigator.clipboard.writeText(text);
+    statusMessage = `Copied BOM structure for ${partObjectLabel(rootPart)} (${rows.length} row${rows.length === 1 ? "" : "s"})`;
+  } catch {
+    statusMessage = text;
+  }
+  renderApp();
+}
+
 async function copyPartDetails(part) {
   return copyItemId(part);
 }
 
 navigationTree.addEventListener("click", (event) => {
+  const cycleAlternate = event.target.closest("[data-cycle-bom-alternate]");
+  if (cycleAlternate) {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = cycleAlternate.dataset.cycleBomAlternate === "root"
+      ? "root"
+      : cycleAlternate.dataset.cycleBomAlternate;
+    cycleBomAlternate(target);
+    return;
+  }
+
   const addBlank = event.target.closest("[data-bom-add-blank]");
   if (addBlank) {
     event.preventDefault();
@@ -6761,7 +7096,7 @@ navigationTree.addEventListener("click", (event) => {
   }
 
   if (button.dataset.bomPartNumber) {
-    if (event.target.closest("input, select, textarea, [data-bom-pick-item], [data-bom-drag]")) {
+    if (event.target.closest("input, select, textarea, [data-bom-pick-item], [data-bom-drag], [data-cycle-bom-alternate]")) {
       return;
     }
     if (String(button.dataset.bomPartNumber).startsWith("blank:")) {
@@ -6984,6 +7319,10 @@ document.addEventListener("keydown", (event) => {
     }
     if (alternateModal && !alternateModal.hidden) {
       closeAlternateModal();
+      return;
+    }
+    if (workflowModal && !workflowModal.hidden) {
+      closeWorkflowTransitionModal();
       return;
     }
     if (settingsModal && !settingsModal.hidden) {
@@ -7269,6 +7608,7 @@ document.addEventListener("click", (event) => {
     if (closeModal.dataset.closeModal === "search") closeSearchModal();
     if (closeModal.dataset.closeModal === "alternate") closeAlternateModal();
     if (closeModal.dataset.closeModal === "settings") closeSettingsModal();
+    if (closeModal.dataset.closeModal === "workflow") closeWorkflowTransitionModal();
     return;
   }
 
@@ -7411,6 +7751,12 @@ alternateModal?.addEventListener("click", (event) => {
   const assign = event.target.closest("[data-assign-alternate]");
   if (!assign) return;
   assignAlternateFromPicker(assign.dataset.assignAlternate);
+});
+
+workflowModal?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-confirm-workflow-transition]")) {
+    confirmWorkflowTransitionFromModal();
+  }
 });
 
 searchInput?.addEventListener("input", () => {
@@ -8065,15 +8411,10 @@ async function createProjectFromForm() {
   const owner = document.querySelector("#newProjectOwner")?.value.trim();
   const description = document.querySelector("#newProjectDescription")?.value.trim();
   const allowCustomPartNumbers = document.querySelector("#newProjectCustomNumbers")?.checked === true;
-  const approvers = (document.querySelector("#newProjectApprovers")?.value || "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
   const missing = [
     ["Project name", name],
     ["Project code", key],
     ["Owner", owner],
-    ["Approvers", approvers.length ? "set" : ""],
     ["Description", description]
   ]
     .filter(([, value]) => !value)
@@ -8088,7 +8429,7 @@ async function createProjectFromForm() {
     renderApp();
     return;
   }
-  customProjects.push({ name, key, owner, description, approvers, allow_custom_part_numbers: allowCustomPartNumbers });
+  customProjects.push({ name, key, owner, description, allow_custom_part_numbers: allowCustomPartNumbers });
   await persistLocalChanges();
   renderProjectOptions();
   activeCreateMode = "new";
@@ -8166,7 +8507,7 @@ async function saveProjectValues(originalProject, values) {
     existing.description = values.description || "";
     existing.drive_url = values.drive_url || "";
     existing.allow_custom_part_numbers = values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true";
-    existing.approvers = (values.approvers || "").split(",").map((value) => value.trim()).filter(Boolean);
+    delete existing.approvers;
   } else {
     customProjects.push({
       name: originalProject,
@@ -8174,8 +8515,7 @@ async function saveProjectValues(originalProject, values) {
       owner: values.owner || currentEditorName() || "",
       description: values.description || "",
       drive_url: values.drive_url || "",
-      allow_custom_part_numbers: values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true",
-      approvers: (values.approvers || "").split(",").map((value) => value.trim()).filter(Boolean)
+      allow_custom_part_numbers: values.allow_custom_part_numbers === true || values.allow_custom_part_numbers === "true"
     });
   }
   await persistLocalChanges();
@@ -8302,7 +8642,6 @@ async function saveOpenPartFromForm(originalPartNumber) {
   values.driveUrl ??= documentUrl(part, "drive");
   values.onshapeUrl ??= documentUrl(part, "onshape");
   values.workUrl ??= documentUrl(part, "work");
-  values.approvers ??= (part.approvers ?? []).map((approver) => approver.name || approver).join(", ");
   values.change_summary ??= part.change_summary || "";
   if (!values.name) {
     statusMessage = "Part name is required";
@@ -8351,15 +8690,11 @@ async function saveOpenPartFromForm(originalPartNumber) {
       revisions: siblingParts.map((revisionPart) => `${sibling.part_number}^${revisionPart.revision || "A"}.json`)
     };
   });
-  const approvers = values.approvers
-    ? values.approvers.split(",").map((name) => ({ name: name.trim() })).filter((approver) => approver.name)
-    : [];
   part.release_status = revisionStatusValue(part);
   part.owner = editor;
   part.updated_by = editor;
   part.change_summary = values.change_summary || "";
   part.updated_at = today;
-  part.approvers = approvers;
   appendPartActivity(part, "updated_properties", values.change_summary || `Updated properties for ${partObjectLabel(part)}`, {
     actor: editor
   });
@@ -8376,7 +8711,8 @@ async function saveOpenPartFromForm(originalPartNumber) {
     updated_by: part.updated_by,
     updated_at: part.updated_at,
     based_on: part.based_on || null,
-    approvers: part.approvers,
+    approver: part.approver || "",
+    approvers: part.approvers || [],
     bom: bomItemsForPersist(part.bom),
     attachments: part.attachments || [],
     activity_history: part.activity_history || [],
@@ -8468,6 +8804,7 @@ function assignBomRowPart(rowIdentifier, partNumber) {
     return;
   }
   const wasBlank = isBlankBomItem(owner.item);
+  clearBomAlternateViewForItem(owner.item);
   owner.item.child_object_id = partKey(childPart);
   owner.item.child_part_number = childPart.part_number;
   owner.item.child_revision = childPart.revision;
@@ -8482,6 +8819,63 @@ function assignBomRowPart(rowIdentifier, partNumber) {
   enableBomColumnResizing();
   enableBomColumnReordering();
   if (recordCount) recordCount.textContent = statusMessage;
+}
+
+function cycleBomAlternate(rowIdentifier) {
+  if (!requireProfileForEdit()) return;
+  const isRoot = rowIdentifier === "root" || rowIdentifier === openedPartNumber;
+  if (isRoot) {
+    const rootPart = getOpenedPart();
+    const group = approvedAlternateGroup(rootPart);
+    if (group.length < 2) return;
+    const current = canonicalPartNumber(rootPart.part_number);
+    const index = Math.max(0, group.findIndex((part) => canonicalPartNumber(part.part_number) === current));
+    const next = group[(index + 1) % group.length];
+    if (!next || canonicalPartNumber(next.part_number) === current) return;
+    statusMessage = `Switched to alternate ${partObjectLabel(next)}`;
+    moveToPart(partKey(next));
+    return;
+  }
+
+  const owner = findBomItemOwner(rowIdentifier);
+  const child = resolveBomChild(owner?.item, { forDisplay: true });
+  const group = approvedAlternateGroup(child);
+  if (!owner || !child || group.length < 2) return;
+
+  const current = canonicalPartNumber(child.part_number);
+  const index = Math.max(0, group.findIndex((part) => canonicalPartNumber(part.part_number) === current));
+  let next = null;
+  for (let step = 1; step <= group.length; step += 1) {
+    const candidate = group[(index + step) % group.length];
+    const candidateNumber = canonicalPartNumber(candidate.part_number);
+    if (!candidateNumber || candidateNumber === current) continue;
+    const duplicate = (owner.parent.bom || []).some((item, itemIndex) => {
+      if (itemIndex === owner.index) return false;
+      const existing = resolveBomChild(item, { forDisplay: true });
+      return existing && canonicalPartNumber(existing.part_number) === candidateNumber;
+    });
+    if (duplicate) continue;
+    next = candidate;
+    break;
+  }
+  if (!next) {
+    statusMessage = "No other approved alternate available for this BOM line";
+    renderApp();
+    return;
+  }
+
+  const viewKey = bomLineViewKey(owner.item);
+  if (!viewKey) return;
+  const storedNumber = canonicalPartNumber(owner.item.child_part_number);
+  const nextNumber = canonicalPartNumber(next.part_number);
+  if (nextNumber && storedNumber && nextNumber === storedNumber) {
+    bomAlternateViewByLine.delete(viewKey);
+  } else {
+    bomAlternateViewByLine.set(viewKey, next.part_number);
+  }
+  selectedBomPartNumber = partKey(next);
+  statusMessage = `Showing alternate ${partObjectLabel(next)}`;
+  renderApp();
 }
 
 function toggleBomCollapse(partIdentifier) {
@@ -8500,7 +8894,8 @@ function removeBomItem(childIdentifier) {
     return;
   }
   const blank = isBlankBomItem(owner.item);
-  owner.parent.bom = (owner.parent.bom || []).filter((item) => bomItemIdentifier(item) !== childIdentifier);
+  clearBomAlternateViewForItem(owner.item);
+  owner.parent.bom = (owner.parent.bom || []).filter((item) => bomItemIdentifier(item) !== childIdentifier && bomItemIdentifier(item, { forDisplay: true }) !== childIdentifier);
   owner.parent.updated_at = new Date().toISOString().slice(0, 10);
   if (selectedBomPartNumber === childIdentifier) {
     selectedBomPartNumber = openedPartNumber;
@@ -8558,12 +8953,15 @@ function findBomItemOwner(childIdentifier, parent = getOpenedPart(), visited = n
   }
   visited.add(partKey(parent));
   const bom = parent.bom || [];
-  const index = bom.findIndex((item) => bomItemIdentifier(item) === childIdentifier);
+  const index = bom.findIndex((item) => (
+    bomItemIdentifier(item) === childIdentifier
+    || bomItemIdentifier(item, { forDisplay: true }) === childIdentifier
+  ));
   if (index >= 0) {
     return { parent, item: bom[index], index };
   }
   for (const item of bom) {
-    const child = resolveBomChild(item);
+    const child = resolveBomChild(item, { forDisplay: true });
     const owner = findBomItemOwner(childIdentifier, child, visited);
     if (owner) {
       return owner;
@@ -8572,8 +8970,8 @@ function findBomItemOwner(childIdentifier, parent = getOpenedPart(), visited = n
   return null;
 }
 
-function bomItemIdentifier(item) {
-  const child = resolveBomChild(item);
+function bomItemIdentifier(item, { forDisplay = false } = {}) {
+  const child = resolveBomChild(item, { forDisplay });
   return child ? partKey(child) : item.child_object_id || item.child_part_number;
 }
 
@@ -9484,7 +9882,7 @@ async function pushTabularChangesToRunner() {
   renderApp();
 }
 
-async function pushWorkflowTransitionToRunner({ workflow, mode, title, label, target, part, files = productDataSnapshotFiles(), deletePaths = [] }) {
+async function pushWorkflowTransitionToRunner({ workflow, mode, title, label, target, part, files = productDataSnapshotFiles(), deletePaths = [], approver = "" }) {
   try {
     const response = await fetch(peakRunnerWorkflowUrl, {
       method: "POST",
@@ -9498,7 +9896,8 @@ async function pushWorkflowTransitionToRunner({ workflow, mode, title, label, ta
         partNumber: part.part_number,
         revision: part.revision || "A",
         files,
-        deletePaths
+        deletePaths,
+        approver
       })
     });
     const payload = await response.json().catch(() => ({}));
@@ -9562,7 +9961,6 @@ function productProjectsPayload() {
       name,
       key: projectKey(name),
       owner: projectOwner(name),
-      approvers: projectApprovers(name),
       description: projectDescription(name),
       drive_url: projectDriveUrl(name),
       allow_custom_part_numbers: projectAllowsCustomPartNumbers(name)
@@ -9615,6 +10013,7 @@ function productRevisionProperties(part) {
     updated_by: part.updated_by || part.owner,
     updated_at: part.updated_at,
     based_on: part.based_on || null,
+    approver: part.approver || "",
     approvers: part.approvers || [],
     bom: bomItemsForPersist(part.bom),
     attachments: part.attachments || part.documents || [],
