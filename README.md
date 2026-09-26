@@ -11,12 +11,12 @@ credentials.
 
 ## Release files
 
-Build PEAK 2.1.0 locally with `npm run dist`, or download from the
-[GitHub releases page](https://github.com/Launch-Canada/PEAK/releases) when published.
+Build PEAK 2.1.1 locally with `npm run dist`, or download from the
+[GitHub releases page](https://github.com/tysocks/PEAK/releases) when published.
 
 The Windows release contains:
 
-- `PEAK-Setup-2.1.0.exe` — interactive per-user installer.
+- `PEAK-Setup-2.1.1.exe` — interactive per-user installer.
 - `win-unpacked/PEAK.exe` — unpacked application for release verification.
 
 The installer creates Start Menu and desktop shortcuts and allows the user to
@@ -34,7 +34,7 @@ Windows SmartScreen may show an unrecognized-publisher warning.
 ## Installation
 
 1. Close any running copy of PEAK.
-2. Run `PEAK-Setup-2.1.0.exe`.
+2. Run `PEAK-Setup-2.1.1.exe`.
 3. If Windows SmartScreen appears, verify the installer came from the expected
    release source, select **More info**, then **Run anyway**.
 4. Choose the installation directory and complete installation.
@@ -207,7 +207,7 @@ requires a freshly cloned data repository.
 
 ### D. Install and verify clean first run
 
-1. Run the new `PEAK-Setup-2.1.0.exe` installer.
+1. Run the new `PEAK-Setup-2.1.1.exe` installer.
 2. Start PEAK.
 3. Open **Settings > Directory** before selecting anything.
 4. Confirm:
@@ -266,4 +266,4 @@ peak.config.example.json
 README.md
 ```
 
-Application source: <https://github.com/Launch-Canada/PEAK>
+Application source: <https://github.com/tysocks/PEAK>
