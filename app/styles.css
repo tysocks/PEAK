@@ -4135,6 +4135,37 @@ body[data-accent] {
   color: var(--peak-text-dim);
 }
 
+.projectNewRow td {
+  padding: 0 !important;
+  background: transparent !important;
+}
+
+.projectNewRowBtn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--peak-text-dim);
+  cursor: pointer;
+}
+
+.projectNewRowBtn:hover {
+  background: var(--peak-hover);
+  color: var(--peak-text);
+}
+
+.projectDraftNameInput {
+  width: 100%;
+  height: 26px;
+  border-color: transparent;
+  background: transparent;
+  padding: 0 2px;
+}
+
 .projectWorkspace .revisionList {
   font-family: var(--peak-font-family);
   font-size: 0.75rem;
@@ -5543,8 +5574,23 @@ html.peak-electron .tabBar {
   overflow: auto;
 }
 
+.settingsModalMain {
+  display: flex;
+  flex-direction: column;
+}
+
 .settingsModalBody {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   padding: 20px 24px 28px;
+}
+
+.settingsPanel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
 
 .settingsPanelHeader {
@@ -5609,6 +5655,178 @@ html.peak-electron .tabBar {
   margin: 0;
   font-size: 0.75rem;
   color: var(--peak-text-dim);
+}
+
+.settingsDirectoryList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
+.settingsGithubFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 18px;
+}
+
+.settingsGithubAction {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--peak-text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.settingsGithubAction:hover {
+  color: var(--peak-text);
+}
+
+.settingsDirectoryCard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--peak-divider);
+  border-radius: var(--peak-radius-md);
+  background: color-mix(in srgb, var(--peak-elevated) 72%, var(--peak-bg));
+}
+
+.settingsDirectoryCard.is-active {
+  border-color: var(--peak-line);
+  background: color-mix(in srgb, var(--peak-active) 55%, var(--peak-elevated));
+}
+
+.settingsDirectoryCardTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.settingsDirectoryCardTitle {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settingsDirectoryRemote {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #6b32c9;
+  box-shadow: 0 0 0 1px rgba(107, 50, 201, 0.28);
+}
+
+.settingsDirectoryRemote::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #fff;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+
+.settingsDirectoryBadge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--peak-active);
+  color: var(--peak-text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.settingsDirectoryRemove {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  border: none;
+  border-radius: var(--peak-radius-xs);
+  background: transparent;
+  color: var(--peak-text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.settingsDirectoryRemove:hover {
+  background: var(--peak-hover);
+  color: var(--peak-text);
+}
+
+.settingsDirectoryPath {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--peak-divider);
+  border-radius: var(--peak-radius-sm);
+  background: var(--peak-bg);
+  color: var(--peak-text);
+  font-family: var(--peak-mono-family);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.settingsDirectoryCancel {
+  appearance: none;
+  align-self: flex-start;
+  margin-top: 2px;
+  border: none;
+  background: transparent;
+  color: var(--peak-text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0;
+}
+
+.settingsDirectoryCancel:hover {
+  color: var(--peak-text);
+}
+
+.settingsDirectoryAdd {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  min-height: 72px;
+  width: 100%;
+  border: 1px dashed var(--peak-line);
+  border-radius: var(--peak-radius-md);
+  background: transparent;
+  color: var(--peak-text-dim);
+  cursor: pointer;
+}
+
+.settingsDirectoryAdd span {
+  font-size: 1.6rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.settingsDirectoryAdd:hover {
+  background: var(--peak-hover);
+  color: var(--peak-text);
+  border-color: color-mix(in srgb, var(--peak-text) 28%, var(--peak-divider));
 }
 
 .settingsPanelActions {

@@ -26,6 +26,7 @@ const splitResizer = document.querySelector("#splitResizer");
 const favoritesListEl = document.querySelector("#favoritesList");
 const projectsTreeEl = document.querySelector("#projectsTree");
 const inboxListEl = document.querySelector("#inboxList");
+const remotesListEl = document.querySelector("#remotesList");
 const sidebarHomeView = document.querySelector("#sidebarHomeView");
 const sidebarInboxView = document.querySelector("#sidebarInboxView");
 const createModal = document.querySelector("#createModal");
@@ -102,6 +103,7 @@ const bomDefaultColumnOrder = ["item", "name", "quantity", "revision", "status"]
 let activeBomColumnOrder = loadBomColumnOrder();
 let activeSettingsTab = "profile";
 let settingsProfileFeedback = null;
+let settingsDirectoryFeedback = null;
 let activeColorScheme = localStorage.getItem("peakColorScheme") || "dark";
 let activeFontFamily = localStorage.getItem("peakFontFamily") || "inter";
 let activeFontSize = Number(localStorage.getItem("peakFontSize") || "14") || 14;
@@ -120,6 +122,9 @@ let productDataDirectoryHandle = null;
 let productDataFolderName = localStorage.getItem("peakProductDataFolderName") || "";
 let runnerProductDataDir = "";
 let productDataRemote = "";
+let productDataDirectories = [];
+let addingProductDataDirectory = false;
+let projectCreateDraft = null;
 
 let workspaceTabs = [];
 let activeTabId = null;
@@ -154,7 +159,8 @@ const peakRunnerPushUrl = "/api/git/push-draft";
 const peakRunnerWorkflowUrl = "/api/git/workflow-transition";
 const peakRunnerPullMainUrl = "/api/git/pull-main";
 const peakRunnerConfigProductDataFolderUrl = "/api/config/product-data-folder";
-const peakRunnerConfigProductDataRemoteUrl = "/api/config/product-data-remote";
+const peakRunnerConfigProductDataFolderActiveUrl = "/api/config/product-data-folder/active";
+const peakRunnerConfigProductDataFolderRemoveUrl = "/api/config/product-data-folder/remove";
 const peakRunnerGitHubAuthStatusUrl = "/api/github/auth-status";
 const peakRunnerGitHubAuthLoginUrl = "/api/github/auth-login";
 
@@ -493,6 +499,31 @@ function renderEmptyWorkspace() {
   setWorkspaceEmptyState(true);
 }
 
+function closeAllWorkspaceTabs() {
+  workspaceTabs = [];
+  activeTabId = null;
+  secondaryTabId = null;
+  splitViewEnabled = false;
+  tabHistory = [];
+  tabHistoryIndex = -1;
+  openedPartNumber = null;
+  selectedBomPartNumber = null;
+  selectedPartNumber = null;
+  selectedProjectName = null;
+  activePartEditMode = false;
+  activeAttachmentEditMode = false;
+  activeAlternateEditMode = false;
+  activeProjectEditMode = false;
+  partAsidePanel = null;
+  partOptionsMenuOpen = false;
+  partOptionsSearchQuery = "";
+  clearAlternateEditDraft();
+  clearAttachmentEditDraft();
+  renderEmptyWorkspace();
+  renderTabBar();
+  syncTabHistoryButtons();
+}
+
 function applyTabToWorkspace(tab) {
   activeNavMode = tab.type === "part" ? "part" : tab.type;
   if (tab.type === "part") {
@@ -660,6 +691,7 @@ function renderSidebarChrome() {
   if (sidebarInboxView) sidebarInboxView.hidden = sidebarMode !== "inbox";
   renderFavoritesList();
   renderProjectsTree();
+  renderRemotesList();
   renderInboxList();
 }
 
@@ -841,6 +873,22 @@ function inboxItems() {
     const needsAction = ["draft", "release_candidate"].includes(revisionStatusValue(part));
     return involvesMe && needsAction;
   }).slice(0, 80);
+}
+
+function renderRemotesList() {
+  if (!remotesListEl) return;
+  if (!productDataDirectories.length) {
+    remotesListEl.innerHTML = `<p class="sidebarEmpty">Add a folder in Settings → Directory.</p>`;
+    return;
+  }
+  remotesListEl.innerHTML = productDataDirectories.map((directory) => {
+    const active = directory.active ? " active" : "";
+    return `
+      <button class="sidebarItem${active}" type="button" data-activate-remote="${escapeHtml(directory.path)}" title="${escapeHtml(directory.path)}"${directory.active ? " aria-current=\"true\"" : ""}>
+        <span class="sidebarItemLabel">${escapeHtml(directory.name || directory.path)}</span>
+      </button>
+    `;
+  }).join("");
 }
 
 function renderInboxList() {
@@ -1466,7 +1514,7 @@ async function loadParts() {
       statusMessage = error.message;
     }
   } else if (!loadedFromRunner) {
-    statusMessage = "Select a local product data folder in Settings > Setup.";
+    statusMessage = "Add a local product data folder in Settings > Directory.";
   }
 
   if (!Array.isArray(loadedParts)) {
@@ -1504,15 +1552,7 @@ async function syncRunnerConfigDisplay() {
     if (!response.ok || payload.ok === false) {
       return null;
     }
-    runnerProductDataDir = payload.productDataDir || "";
-    productDataRemote = payload.remote || "";
-    if (runnerProductDataDir) {
-      productDataFolderName = runnerProductDataDir;
-      localStorage.setItem("peakProductDataFolderName", productDataFolderName);
-    } else if (!productDataDirectoryHandle) {
-      productDataFolderName = "";
-      localStorage.removeItem("peakProductDataFolderName");
-    }
+    applyDirectoryConfigPayload(payload);
     return payload;
   } catch {
     return null;
@@ -1523,6 +1563,64 @@ function setProductDataFolderFromRunnerPayload(payload) {
   runnerProductDataDir = payload.productDataDir || runnerProductDataDir;
   productDataFolderName = runnerProductDataDir || payload.folderName || productDataFolderName || "Product data runner";
   localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+}
+
+function pathNormalizeForCompare(value) {
+  return String(value || "").trim().replace(/[\\/]+$/g, "").replaceAll("\\", "/").toLowerCase();
+}
+
+function sameProductDataDirectory(left, right) {
+  return Boolean(left) && Boolean(right) && pathNormalizeForCompare(left) === pathNormalizeForCompare(right);
+}
+
+function folderBasename(folderPath) {
+  const normalized = String(folderPath || "").replace(/[\\/]+$/g, "");
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  return segments.at(-1) || normalized;
+}
+
+function applyDirectoryConfigPayload(payload = {}) {
+  runnerProductDataDir = payload.productDataDir || "";
+  productDataRemote = payload.remote || "";
+  productDataDirectories = Array.isArray(payload.directories) ? payload.directories : [];
+  if (runnerProductDataDir) {
+    productDataFolderName = runnerProductDataDir;
+    localStorage.setItem("peakProductDataFolderName", productDataFolderName);
+  } else if (!productDataDirectoryHandle) {
+    productDataFolderName = "";
+    localStorage.removeItem("peakProductDataFolderName");
+  }
+}
+
+async function reloadActiveProductData({ closeTabs = false } = {}) {
+  if (closeTabs) {
+    closeAllWorkspaceTabs();
+  }
+  try {
+    const runnerPayload = await loadPartsFromRunner();
+    parts = sortParts(runnerPayload.parts);
+    customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
+    setProductDataFolderFromRunnerPayload(runnerPayload);
+    await syncRunnerConfigDisplay();
+    hasRepoChanges = false;
+    localStorage.setItem("peakHasLocalChanges", "false");
+    selectedPartNumber = closeTabs ? null : partKey(parts[0]) || null;
+    selectedBomPartNumber = closeTabs ? null : selectedPartNumber;
+    openedPartNumber = null;
+    selectedProjectName = "";
+    renderProjectOptions();
+  } catch (error) {
+    parts = [];
+    customProjects = [];
+    selectedPartNumber = null;
+    selectedBomPartNumber = null;
+    openedPartNumber = null;
+    selectedProjectName = "";
+    if (closeTabs) {
+      closeAllWorkspaceTabs();
+    }
+    throw error;
+  }
 }
 
 async function pullMainFromRunner() {
@@ -1712,40 +1810,18 @@ async function loadStoredProductDataFolder() {
 }
 
 async function selectProductDataFolder() {
-  if (window.peakDesktop?.selectProductDataFolder) {
+  if (isDesktopFolderPickerAvailable()) {
     await selectProductDataFolderFromDesktop();
     return;
   }
-  if (navigator.userAgent.includes("Electron")) {
-    statusMessage = "PEAK's desktop folder picker is unavailable. Restart PEAK or install the latest release.";
-    renderApp();
+  const typedPath = document.querySelector("#settingsProductDataFolderDraft")?.value.trim() || "";
+  if (typedPath) {
+    await configureProductDataFolderFromPath(typedPath);
     return;
   }
-  if (!("showDirectoryPicker" in window)) {
-    statusMessage = "This browser does not support selecting local folders. Open PEAK in a Chromium browser.";
-    renderApp();
-    return;
-  }
-  try {
-    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
-    if ((await verifyProductDataFolderPermission(handle, true)) !== "granted") {
-      statusMessage = "PEAK needs read/write permission for the selected product data folder.";
-      renderApp();
-      return;
-    }
-    productDataDirectoryHandle = handle;
-    productDataFolderName = handle.name || "Selected folder";
-    localStorage.setItem("peakProductDataFolderName", productDataFolderName);
-    await saveProductDataHandle(handle);
-    await reloadProductDataFromFolder();
-    refreshSettingsSurfaces();
-  } catch (error) {
-    if (error.name !== "AbortError") {
-      statusMessage = `Could not select product data folder: ${error.message}`;
-      refreshSettingsSurfaces();
-      renderApp();
-    }
-  }
+  addingProductDataDirectory = true;
+  refreshSettingsSurfaces();
+  document.querySelector("#settingsProductDataFolderDraft")?.focus();
 }
 
 async function selectProductDataFolderFromDesktop() {
@@ -1754,35 +1830,106 @@ async function selectProductDataFolderFromDesktop() {
     if (!selection?.path) {
       return;
     }
+    await configureProductDataFolderFromPath(selection.path);
+  } catch (error) {
+    setDirectoryFeedback("warning", `Could not select product data folder: ${runnerErrorMessage(error)}`);
+    refreshSettingsSurfaces();
+    renderApp();
+  }
+}
+
+async function configureProductDataFolderFromPath(folderPath) {
+  const nextPath = String(folderPath || "").trim();
+  if (!nextPath) {
+    setDirectoryFeedback("warning", "Enter a product data folder path.");
+    refreshSettingsSurfaces();
+    renderApp();
+    return;
+  }
+  const previousActive = runnerProductDataDir;
+  try {
     const response = await fetch(peakRunnerConfigProductDataFolderUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ productDataDir: selection.path })
+      body: JSON.stringify({ productDataDir: nextPath })
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.ok === false) {
-      throw new Error(payload.message || "Could not configure product data folder");
+      throw new Error(payload.message || "Could not add product data folder");
     }
-    productDataDirectoryHandle = null;
-    runnerProductDataDir = payload.productDataDir || selection.path || "";
-    productDataFolderName = runnerProductDataDir || selection.name || "Product-Data";
-    localStorage.setItem("peakProductDataFolderName", productDataFolderName);
-    const runnerPayload = await loadPartsFromRunner();
-    parts = sortParts(runnerPayload.parts);
-    customProjects = normalizeProjectsPayload(runnerPayload.projects || { projects: [] });
-    setProductDataFolderFromRunnerPayload(runnerPayload);
-    await syncRunnerConfigDisplay();
-    hasRepoChanges = false;
-    localStorage.setItem("peakHasLocalChanges", "false");
-    selectedPartNumber = partKey(parts[0]) || null;
-    openedPartNumber = null;
-    selectedBomPartNumber = selectedPartNumber;
-    renderProjectOptions();
-    statusMessage = payload.message || `Using product data folder ${productDataFolderName}`;
+    addingProductDataDirectory = false;
+    applyDirectoryConfigPayload(payload);
+    const activeChanged = !sameProductDataDirectory(previousActive, runnerProductDataDir);
+    if (activeChanged && runnerProductDataDir) {
+      await reloadActiveProductData({ closeTabs: workspaceTabs.length > 0 });
+    }
+    setDirectoryFeedback("success", payload.message || `Added ${folderBasename(nextPath)}`);
     refreshSettingsSurfaces();
     renderApp();
   } catch (error) {
-    statusMessage = `Could not select product data folder: ${runnerErrorMessage(error)}`;
+    setDirectoryFeedback("warning", runnerErrorMessage(error));
+    refreshSettingsSurfaces();
+    renderApp();
+  }
+}
+
+async function activateProductDataDirectory(folderPath) {
+  const nextPath = String(folderPath || "").trim();
+  if (!nextPath || sameProductDataDirectory(nextPath, runnerProductDataDir)) {
+    return;
+  }
+  try {
+    const response = await fetch(peakRunnerConfigProductDataFolderActiveUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productDataDir: nextPath })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "Could not switch product data folder");
+    }
+    applyDirectoryConfigPayload(payload);
+    await reloadActiveProductData({ closeTabs: true });
+    setDirectoryFeedback("success", payload.message || `Switched to ${folderBasename(runnerProductDataDir || nextPath)}`);
+    refreshSettingsSurfaces();
+    renderApp();
+  } catch (error) {
+    setDirectoryFeedback("warning", runnerErrorMessage(error));
+    refreshSettingsSurfaces();
+    renderApp();
+  }
+}
+
+async function removeProductDataDirectory(folderPath) {
+  const nextPath = String(folderPath || "").trim();
+  if (!nextPath) {
+    return;
+  }
+  const previousActive = runnerProductDataDir;
+  try {
+    const response = await fetch(peakRunnerConfigProductDataFolderRemoveUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productDataDir: nextPath })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || "Could not remove product data folder");
+    }
+    applyDirectoryConfigPayload(payload);
+    const activeChanged = !sameProductDataDirectory(previousActive, runnerProductDataDir);
+    if (!runnerProductDataDir) {
+      parts = [];
+      customProjects = [];
+      closeAllWorkspaceTabs();
+    } else if (activeChanged) {
+      await reloadActiveProductData({ closeTabs: true });
+    }
+    setDirectoryFeedback("success", payload.message || `Removed ${folderBasename(nextPath)}`);
+    refreshSettingsSurfaces();
+    renderApp();
+  } catch (error) {
+    setDirectoryFeedback("warning", runnerErrorMessage(error));
     refreshSettingsSurfaces();
     renderApp();
   }
@@ -2579,20 +2726,30 @@ function renderCreatePageIntro(title, detail) {
 
 function renderProjectRows() {
   const projectNames = projects();
-  if (!projectNames.includes(selectedProjectName)) {
+  if (selectedProjectName && !projectNames.includes(selectedProjectName)) {
     selectedProjectName = projectNames[0] || "";
     activeProjectEditMode = false;
   }
   tableHead.innerHTML = "";
-  partsList.innerHTML = projectNames.length
-    ? projectNames.map(projectGalleryRow).join("")
-    : '<tr><td class="emptyCell">No projects found</td></tr>';
+  const rows = projectNames.map(projectGalleryRow).join("");
+  const draft = projectCreateDraft ? renderProjectDraftRow() : "";
+  partsList.innerHTML = `${rows}${draft}${renderProjectNewRow()}`;
+  if (projectCreateDraft?.focus) {
+    projectCreateDraft.focus = false;
+    requestAnimationFrame(() => {
+      const input = document.querySelector("#projectCreateDraftName");
+      input?.focus();
+      input?.select();
+    });
+  }
 }
 
 function renderProjectsDetail() {
-  const project = selectedProjectName || projects()[0] || "";
+  const project = selectedProjectName && projects().includes(selectedProjectName)
+    ? selectedProjectName
+    : "";
   if (!project) {
-    partDetail.innerHTML = '<p class="empty">No project selected</p>';
+    partDetail.innerHTML = "";
     return;
   }
   const editing = activeProjectEditMode;
@@ -2633,6 +2790,93 @@ function renderProjectsDetail() {
     </div>
   `;
   requestAnimationFrame(refreshNotionScrolls);
+}
+
+function renderProjectDraftRow() {
+  return `
+    <tr class="objectRow galleryRow projectDraftRow">
+      <td colspan="6">
+        <div class="galleryItem">
+          <span class="folderIcon" aria-hidden="true"></span>
+          <div class="galleryItemText">
+            <input class="tableInput projectDraftNameInput" id="projectCreateDraftName" value="${escapeHtml(projectCreateDraft?.name || "")}" placeholder="Project name" aria-label="Project name" autocomplete="off">
+          </div>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function renderProjectNewRow() {
+  return `
+    <tr class="galleryRow projectNewRow">
+      <td colspan="6">
+        <button class="projectNewRowBtn" type="button" data-add-project title="Add project" aria-label="Add project">
+          <span class="bomNewRowIcon" aria-hidden="true"></span>
+        </button>
+      </td>
+    </tr>
+  `;
+}
+
+function beginAddProject() {
+  if (!requireProfileForEdit()) return;
+  if (projectCreateDraft) {
+    document.querySelector("#projectCreateDraftName")?.focus();
+    return;
+  }
+  projectCreateDraft = { name: "", focus: true };
+  renderApp();
+}
+
+function cancelProjectDraft() {
+  if (!projectCreateDraft) return;
+  projectCreateDraft = null;
+  renderApp();
+}
+
+async function commitProjectDraft() {
+  const name = String(projectCreateDraft?.name || document.querySelector("#projectCreateDraftName")?.value || "").trim();
+  if (!name) {
+    cancelProjectDraft();
+    return;
+  }
+  if (!requireProfileForEdit()) return;
+  if (projects().includes(name)) {
+    statusMessage = `${name} already exists`;
+    renderApp();
+    document.querySelector("#projectCreateDraftName")?.focus();
+    return;
+  }
+  customProjects.push({
+    name,
+    key: uniqueProjectKey(projectKeyFromName(name)),
+    owner: currentEditorName() || "",
+    description: "",
+    drive_url: "",
+    allow_custom_part_numbers: false
+  });
+  projectCreateDraft = null;
+  selectedProjectName = name;
+  activeProjectEditMode = true;
+  partAsidePanel = null;
+  partOptionsMenuOpen = false;
+  await persistLocalChanges();
+  renderProjectOptions();
+  statusMessage = `Created project ${name}; pushing to ${productDataRemoteLabel()}.`;
+  renderApp();
+  await pushProjectsToRunner(`Create project ${name}`, name);
+}
+
+function uniqueProjectKey(base) {
+  const seed = String(base || "P").trim() || "P";
+  const used = new Set(projects().map((project) => projectKey(project)));
+  if (!used.has(seed)) return seed;
+  let index = 2;
+  while (used.has(`${seed}${index}`)) {
+    index += 1;
+  }
+  return `${seed}${index}`;
 }
 
 function projectGalleryRow(project) {
@@ -2731,6 +2975,7 @@ function renderProjectInfoPanel(project) {
 
 function renderProjectOptionsMenu(project) {
   const driveUrl = projectDriveUrl(project);
+  const canDelete = projectPartCount(project) === 0;
   return `
     <div class="partOptionsMenu" role="menu" aria-label="Project options">
       <div class="partOptionsMenuBody">
@@ -2742,6 +2987,10 @@ function renderProjectOptionsMenu(project) {
           <div class="partOptionsDivider" role="separator"></div>
           ${partOptionItem("Save Project", "save-project", { icon: "save" })}
           ${partOptionItem("Cancel Changes", "cancel-project-edit", { icon: "cancel" })}
+        ` : ""}
+        ${canDelete ? `
+          <div class="partOptionsDivider" role="separator"></div>
+          ${partOptionItem("Delete Project", "delete-project", { icon: "trash", danger: true })}
         ` : ""}
       </div>
     </div>
@@ -2916,6 +3165,7 @@ function editingAsBanner() {
 function openSettingsModal(section = activeSettingsTab) {
   activeSettingsTab = ["profile", "directory", "appearance"].includes(section) ? section : "profile";
   settingsProfileFeedback = null;
+  settingsDirectoryFeedback = null;
   if (!settingsModal || !settingsModalBody) return;
   settingsModal.hidden = false;
   renderSettingsModal();
@@ -2927,6 +3177,14 @@ function closeSettingsModal() {
 
 function refreshSettingsSurfaces() {
   if (settingsModal && !settingsModal.hidden) renderSettingsModal();
+}
+
+function setDirectoryFeedback(tone, text) {
+  const message = String(text || "").trim();
+  settingsDirectoryFeedback = message ? { tone: tone || "warning", text: message } : null;
+  if (message) {
+    statusMessage = message;
+  }
 }
 
 function saveProfileFromForm() {
@@ -2984,61 +3242,104 @@ function renderSettingsProfilePanel() {
         <label class="settingsFieldLabel" for="settingsProfileUsername">Profile Username <span class="requiredMark" aria-hidden="true">*</span></label>
         <input class="settingsFieldInput" id="settingsProfileUsername" value="${escapeHtml(getProfileUsername())}" placeholder="username" autocomplete="username">
       </div>
-      <div class="settingsPanelActions">
-        <button class="iconButton primaryAction formAction" type="button" data-save-profile>Save Profile</button>
-      </div>
     </div>
   `;
 }
 
+function isDesktopFolderPickerAvailable() {
+  return Boolean(window.peakDesktop?.selectProductDataFolder);
+}
+
 function renderSettingsDirectoryPanel() {
-  const productDataFolderDisplay = productDataFolderName || "";
+  const desktopPicker = isDesktopFolderPickerAvailable();
+  const cards = productDataDirectories.map((directory) => renderDirectoryCard(directory)).join("");
+  const draft = addingProductDataDirectory && !desktopPicker ? renderDirectoryDraftCard() : "";
+  const addCard = addingProductDataDirectory && !desktopPicker ? "" : renderDirectoryAddCard();
+  const feedback = settingsDirectoryFeedback
+    ? `<p class="settingsPanelNotice settingsPanelNotice-${settingsDirectoryFeedback.tone}" role="status">${escapeHtml(settingsDirectoryFeedback.text)}</p>`
+    : "";
   return `
     <div class="settingsPanel">
       <header class="settingsPanelHeader">
         <h3>Directory</h3>
-        <p>Product data folder and remote configuration.</p>
+        <p>Add an existing Product-Data folder, or an empty folder to start a new repository.</p>
       </header>
-      <div class="settingsField">
-        <label class="settingsFieldLabel" for="settingsProductDataFolder">Product Data Folder</label>
-        <div class="folderPicker">
-          <input class="settingsFieldInput folderInput" id="settingsProductDataFolder" value="${escapeHtml(productDataFolderDisplay)}" placeholder="No folder selected" readonly>
-          <button class="iconButton formAction" type="button" data-select-product-folder title="Select product data folder" aria-label="Select product data folder" data-icon="folder"></button>
-        </div>
-        <p class="settingsFieldHint">Local Git folder containing manifest.json and parts/</p>
+      ${feedback}
+      <div class="settingsDirectoryList">
+        ${cards}
+        ${draft}
+        ${addCard}
       </div>
-      <div class="settingsField">
-        <label class="settingsFieldLabel" for="settingsProductDataRemote">Product Data Remote</label>
-        <input class="settingsFieldInput" id="settingsProductDataRemote" value="${escapeHtml(productDataRemote)}" placeholder="https://github.com/organization/Product-Data.git">
-        <p class="settingsFieldHint">Required Git origin used for pull, push, and workflow operations</p>
-      </div>
-      <div class="settingsField">
-        <span class="settingsFieldLabel">GitHub Merge Requests</span>
-        ${githubAuthSettingsInline()}
-      </div>
-      <div class="settingsPanelActions">
-        <button class="iconButton primaryAction formAction" type="button" data-save-settings>Save Directory</button>
-      </div>
+      ${githubAuthSettingsInline()}
     </div>
+  `;
+}
+
+function renderDirectoryCard(directory) {
+  const name = directory.name || folderBasename(directory.path);
+  const remote = String(directory.remote || "").trim();
+  const remoteIcon = remote
+    ? `<span class="settingsDirectoryRemote" title="${escapeHtml(remote)}" aria-label="Git remote ${escapeHtml(remote)}"></span>`
+    : "";
+  const active = directory.active
+    ? `<span class="settingsDirectoryBadge">Active</span>`
+    : "";
+  const invalid = directory.valid === false
+    ? `<p class="settingsFieldHint">This folder is missing manifest.json.</p>`
+    : "";
+  return `
+    <article class="settingsDirectoryCard${directory.active ? " is-active" : ""}">
+      <div class="settingsDirectoryCardTop">
+        <h4 class="settingsDirectoryCardTitle">${escapeHtml(name)}</h4>
+        ${remoteIcon}
+        ${active}
+        <button class="settingsDirectoryRemove" type="button" data-remove-directory="${escapeHtml(directory.path)}" title="Remove directory" aria-label="Remove ${escapeHtml(name)}">&times;</button>
+      </div>
+      <span class="settingsFieldLabel">Product Data Folder</span>
+      <p class="settingsDirectoryPath" title="${escapeHtml(directory.path)}">${escapeHtml(directory.path)}</p>
+      ${invalid}
+    </article>
+  `;
+}
+
+function renderDirectoryDraftCard() {
+  return `
+    <article class="settingsDirectoryCard is-draft">
+      <label class="settingsFieldLabel" for="settingsProductDataFolderDraft">Product Data Folder</label>
+      <div class="folderPicker">
+        <input class="settingsFieldInput folderInput" id="settingsProductDataFolderDraft" placeholder="C:\\path\\to\\Product-Data">
+        <button class="iconButton formAction" type="button" data-select-product-folder>Add</button>
+      </div>
+      <p class="settingsFieldHint">Paste the full folder path. An empty folder becomes a new product data repository.</p>
+      <button class="settingsDirectoryCancel" type="button" data-cancel-add-directory>Cancel</button>
+    </article>
+  `;
+}
+
+function renderDirectoryAddCard() {
+  return `
+    <button class="settingsDirectoryAdd" type="button" data-add-directory title="Add product data folder" aria-label="Add product data folder">
+      <span aria-hidden="true">+</span>
+    </button>
   `;
 }
 
 function githubAuthSettingsInline() {
   const status = githubAuthStatus;
   const checking = githubAuthChecking && !status?.authenticated;
-  const state = status?.authenticated ? "Connected" : checking ? "Checking..." : "Not connected";
-  const detail = status?.authenticated
-    ? status.message
-    : status?.action || "Connect GitHub to create workflow merge requests.";
-  const button = status?.authenticated
-    ? `<button class="iconButton formAction" type="button" data-refresh-github-auth>Refresh</button>`
-    : `<button class="iconButton primaryAction formAction" type="button" data-connect-github${checking ? " disabled" : ""}>${checking ? "Connecting..." : "Connect GitHub"}</button>`;
+  const label = status?.authenticated
+    ? (status.login ? `Connected to GitHub as ${status.login}` : "Connected to GitHub")
+    : checking
+      ? "Checking GitHub…"
+      : "GitHub is not connected";
+  const action = status?.authenticated || checking
+    ? ""
+    : `<button class="settingsGithubAction" type="button" data-connect-github>Connect</button>`;
   return `
-    <div class="settingsActionCell">
-      <span class="settingsStatus ${status?.authenticated ? "success" : "warning"}">${escapeHtml(state)}</span>
-      ${button}
+    <div class="settingsGithubFoot">
+      <p class="editingAsLabel">${escapeHtml(label)}</p>
+      ${action}
     </div>
-    <p class="settingsFieldHint">${escapeHtml(detail)}</p>
   `;
 }
 
@@ -3200,7 +3501,6 @@ function renderPartInfoPanel(part) {
     <aside class="partAsidePanel" aria-label="Part details">
       <header class="partAsideHeader">
         <h3>Details</h3>
-        <button class="partAsideClose" type="button" data-part-panel-close aria-label="Close">×</button>
       </header>
       <div class="notionPropsPanel">
         <div class="notionPropRow">
@@ -3278,8 +3578,8 @@ function renderPartOptionsMenu(part) {
   `;
 }
 
-function partOptionItem(label, action, { icon = "", disabled = false, active = false, title = "" } = {}) {
-  return `<button class="partOptionItem${active ? " is-active" : ""}" type="button" role="menuitem" data-part-action="${escapeHtml(action)}" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}"${disabled ? " disabled" : ""}${active ? " aria-current=\"true\"" : ""}${title ? ` title="${escapeHtml(title)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(label)}</span></button>`;
+function partOptionItem(label, action, { icon = "", disabled = false, active = false, title = "", danger = false } = {}) {
+  return `<button class="partOptionItem${active ? " is-active" : ""}${danger ? " danger" : ""}" type="button" role="menuitem" data-part-action="${escapeHtml(action)}" data-option-label="${escapeHtml(label)}" data-option-icon="${escapeHtml(icon)}"${disabled ? " disabled" : ""}${active ? " aria-current=\"true\"" : ""}${title ? ` title="${escapeHtml(title)}"` : ""}><span class="partOptionIcon" aria-hidden="true"></span><span class="partOptionLabel">${escapeHtml(label)}</span></button>`;
 }
 
 function workflowMenuAction(transition, rule, label, workflow, part, { danger = false, alwaysShow = false, icon = "", title = "" } = {}) {
@@ -5508,6 +5808,10 @@ function projectAllowsCustomPartNumbers(project) {
   return customProjects.find((candidate) => candidate.name === project)?.allow_custom_part_numbers === true;
 }
 
+function projectPartCount(project) {
+  return parts.filter((part) => part.project === project).length;
+}
+
 function projectApprovers(project) {
   const custom = customProjects.find((candidate) => candidate.name === project);
   if (Array.isArray(custom?.approvers)) {
@@ -5517,7 +5821,7 @@ function projectApprovers(project) {
 }
 
 function nextProjectKey() {
-  return `PROJ-${String(projects().length + 1).padStart(3, "0")}`;
+  return uniqueProjectKey(`PROJ-${String(projects().length + 1).padStart(3, "0")}`);
 }
 
 function nextProjectPartNumber(project) {
@@ -5923,7 +6227,40 @@ partsList.addEventListener("dblclick", (event) => {
   openSelectedPart();
 });
 
+partsList.addEventListener("input", (event) => {
+  if (event.target.matches("#projectCreateDraftName") && projectCreateDraft) {
+    projectCreateDraft.name = event.target.value;
+  }
+});
+
+partsList.addEventListener("focusout", (event) => {
+  if (!event.target.matches("#projectCreateDraftName") || !projectCreateDraft) {
+    return;
+  }
+  if (event.relatedTarget?.closest("[data-add-project], .projectDraftRow")) {
+    return;
+  }
+  commitProjectDraft().catch((error) => {
+    statusMessage = `Project create failed: ${error.message}`;
+    renderApp();
+  });
+});
+
 partsList.addEventListener("keydown", (event) => {
+  if (event.target.matches("#projectCreateDraftName")) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitProjectDraft().catch((error) => {
+        statusMessage = `Project create failed: ${error.message}`;
+        renderApp();
+      });
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelProjectDraft();
+    }
+    return;
+  }
   if (event.key !== "Enter" && event.key !== " ") {
     return;
   }
@@ -6482,6 +6819,13 @@ function handleProjectAction(action) {
     partOptionsSearchQuery = "";
     statusMessage = "Cancelled project edits";
     renderApp();
+    return;
+  }
+  if (action === "delete-project") {
+    deleteProject(project).catch((error) => {
+      statusMessage = `Project delete failed: ${error.message}`;
+      renderApp();
+    });
     return;
   }
   if (action === "open-project-drive") {
@@ -7064,7 +7408,7 @@ navigationTree.addEventListener("click", (event) => {
   }
 
   if (button.dataset.focusSettings) {
-    document.querySelector("#settingsProductDataFolder")?.focus();
+    document.querySelector("#settingsProductDataFolderDraft")?.focus();
     return;
   }
 
@@ -7590,6 +7934,12 @@ appSidebar?.addEventListener("click", (event) => {
   const openProject = event.target.closest("[data-open-project]");
   if (openProject) {
     openFavoriteProject(openProject.dataset.openProject, { newTab: isNewTabModifierClick(event) });
+    return;
+  }
+
+  const activateRemote = event.target.closest("[data-activate-remote]");
+  if (activateRemote) {
+    activateProductDataDirectory(activateRemote.dataset.activateRemote);
   }
 });
 
@@ -7709,6 +8059,23 @@ settingsModal?.addEventListener("click", (event) => {
     return;
   }
 
+  if (event.target.closest("[data-add-directory]")) {
+    selectProductDataFolder();
+    return;
+  }
+
+  if (event.target.closest("[data-cancel-add-directory]")) {
+    addingProductDataDirectory = false;
+    refreshSettingsSurfaces();
+    return;
+  }
+
+  const removeDirectory = event.target.closest("[data-remove-directory]");
+  if (removeDirectory) {
+    removeProductDataDirectory(removeDirectory.dataset.removeDirectory);
+    return;
+  }
+
   const themeModeButton = event.target.closest("[data-theme-mode]");
   if (themeModeButton) {
     activeColorScheme = themeModeButton.dataset.themeMode;
@@ -7727,6 +8094,13 @@ settingsModal?.addEventListener("input", (event) => {
   }
 });
 
+settingsModal?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target.matches("#settingsProductDataFolderDraft")) {
+    event.preventDefault();
+    selectProductDataFolder();
+  }
+});
+
 settingsModal?.addEventListener("change", (event) => {
   if (event.target.matches("#peakFontFamily")) {
     activeFontFamily = event.target.value || "inter";
@@ -7740,6 +8114,10 @@ settingsModal?.addEventListener("change", (event) => {
     localStorage.setItem("peakFontSize", String(activeFontSize));
     applyAppearance(activeColorScheme);
     refreshSettingsSurfaces();
+    return;
+  }
+  if (event.target.matches("#settingsProfileName, #settingsProfileUsername")) {
+    saveProfileFromForm();
   }
 });
 
@@ -7766,6 +8144,12 @@ searchInput?.addEventListener("input", () => {
 });
 
 partsList.addEventListener("click", (event) => {
+  if (event.target.closest("[data-add-project]")) {
+    event.preventDefault();
+    beginAddProject();
+    return;
+  }
+
   const projectCard = event.target.closest("[data-project-name]");
   if (projectCard && activeNavMode === "projects") {
     selectedProjectName = projectCard.dataset.projectName;
@@ -8499,6 +8883,35 @@ function saveSelectedProjectFromDetail(originalProject) {
   });
 }
 
+async function deleteProject(project) {
+  if (!requireProfileForEdit()) return;
+  const name = String(project || "").trim();
+  if (!name) return;
+  if (projectPartCount(name) > 0) {
+    statusMessage = `Cannot delete ${name} while it still has parts.`;
+    partOptionsMenuOpen = false;
+    renderApp();
+    return;
+  }
+  customProjects = customProjects.filter((item) => item.name !== name);
+  favoriteProjectNames = favoriteProjectNames.filter((item) => item !== name);
+  saveFavoriteProjects();
+  expandedProjectFolders.delete(name);
+  saveExpandedProjects();
+  if (selectedProjectName === name) {
+    selectedProjectName = projects().find((item) => item !== name) || "";
+    activeProjectEditMode = false;
+  }
+  partOptionsMenuOpen = false;
+  partOptionsSearchQuery = "";
+  partAsidePanel = null;
+  await persistLocalChanges();
+  renderProjectOptions();
+  statusMessage = `Deleted project ${name}; pushing to ${productDataRemoteLabel()}.`;
+  renderApp();
+  await pushProjectsToRunner(`Delete project ${name}`, name);
+}
+
 async function saveProjectValues(originalProject, values) {
   const existing = customProjects.find((project) => project.name === originalProject);
   if (existing) {
@@ -9001,31 +9414,7 @@ function showSyncAction(action) {
 }
 
 async function saveSettingsFromForm() {
-  const configuredProductData = runnerProductDataDir || (productDataDirectoryHandle ? productDataFolderName : "");
-  if (!configuredProductData) {
-    statusMessage = "Select a product data folder before configuring its remote";
-    refreshSettingsSurfaces();
-    renderApp();
-    return;
-  }
-  const remote = document.querySelector("#settingsProductDataRemote")?.value.trim() || "";
-  if (!remote) {
-    statusMessage = "Enter the Product Data Remote before saving setup";
-    refreshSettingsSurfaces();
-    renderApp();
-    return;
-  }
-  const response = await fetch(peakRunnerConfigProductDataRemoteUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ remote })
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    throw new Error(payload.message || "Could not configure product data remote");
-  }
-  productDataRemote = payload.remote || remote;
-  statusMessage = `Using product data folder ${configuredProductData}; remote ${productDataRemote}`;
+  await syncRunnerConfigDisplay();
   refreshSettingsSurfaces();
   renderApp();
 }

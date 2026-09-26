@@ -11,12 +11,12 @@ credentials.
 
 ## Release files
 
-Build PEAK 2.0.0 locally with `npm run dist`, or download from the
+Build PEAK 2.1.0 locally with `npm run dist`, or download from the
 [GitHub releases page](https://github.com/Launch-Canada/PEAK/releases) when published.
 
 The Windows release contains:
 
-- `PEAK-Setup-2.0.0.exe` — interactive per-user installer.
+- `PEAK-Setup-2.1.0.exe` — interactive per-user installer.
 - `win-unpacked/PEAK.exe` — unpacked application for release verification.
 
 The installer creates Start Menu and desktop shortcuts and allows the user to
@@ -34,7 +34,7 @@ Windows SmartScreen may show an unrecognized-publisher warning.
 ## Installation
 
 1. Close any running copy of PEAK.
-2. Run `PEAK-Setup-2.0.0.exe`.
+2. Run `PEAK-Setup-2.1.0.exe`.
 3. If Windows SmartScreen appears, verify the installer came from the expected
    release source, select **More info**, then **Run anyway**.
 4. Choose the installation directory and complete installation.
@@ -48,21 +48,14 @@ PEAK installs per user by default. A typical installation is under:
 
 ## First-run setup
 
-A new PEAK installation intentionally starts with no Product Data Folder and no
-Product Data Remote. Registry data and Git operations are unavailable until the
-required setup is completed. PEAK does not ship a workstation path or silently
-discover a Product-Data folder.
+A new PEAK installation starts with no Product-Data folders. Registry data and
+Git operations are unavailable until at least one folder is added. PEAK does
+not ship a workstation path or silently discover a Product-Data folder.
 
 ### 1. Prepare Product-Data
 
-Clone the Product-Data repository to a location chosen by the user. For
-example:
-
-```powershell
-git clone https://github.com/ORGANIZATION/Product-Data.git C:\Engineering\Product-Data
-```
-
-The selected folder must be a Git repository and contain at least:
+Clone an existing Product-Data repository, or create an empty folder and let
+PEAK initialize it. An existing checkout must contain at least:
 
 ```text
 manifest.json
@@ -70,35 +63,35 @@ projects.json
 parts\
 ```
 
-### 2. Select the folder
+Example clone:
+
+```powershell
+git clone https://github.com/ORGANIZATION/Product-Data.git C:\Engineering\Product-Data
+```
+
+### 2. Add directories
 
 1. Open **Settings** from the left navigation.
-2. Open the **Setup** tab.
-3. Confirm **Product Data Folder** is blank on a clean installation.
-4. Select the folder button and choose the Product-Data checkout.
-5. PEAK validates `manifest.json` before accepting the folder.
+2. Open the **Directory** tab.
+3. Use **+** to add a Product-Data checkout or an empty folder.
+4. An empty folder becomes a new local Product-Data repository.
+5. PEAK reads Git `origin` from that folder's `.git`. A purple cloud badge
+   appears when a remote is configured.
 
-### 3. Configure the remote
+Switch the active folder from **Inbox > Remotes**. Swapping closes open
+workspace tabs and reloads that repository.
 
-After folder selection, PEAK reads the checkout's Git `origin`. If `origin` is
-already configured, **Product Data Remote** is populated with its URL. If it is
-blank or needs changing:
+Pull, push, and workflow operations remain blocked when the active folder has
+no Git origin.
 
-1. Enter the complete Git remote URL, such as
-   `https://github.com/ORGANIZATION/Product-Data.git`.
-2. Select **Save Settings**.
-3. PEAK adds or updates the checkout's `origin` remote.
-
-Pull, push, and workflow operations remain blocked when no remote is configured.
-
-### 4. Connect GitHub
+### 3. Connect GitHub
 
 For GitHub-hosted repositories and pull-request workflows:
 
 1. Install GitHub CLI from <https://cli.github.com/>.
-2. In **Settings > Setup**, select **Connect GitHub**.
+2. In **Settings > Directory**, select **Connect** if GitHub is not connected.
 3. Complete the browser authentication flow.
-4. Return to PEAK and confirm the status reports **Connected**.
+4. Return to PEAK and confirm the status reports connected.
 
 ## Using PEAK
 
@@ -214,19 +207,18 @@ requires a freshly cloned data repository.
 
 ### D. Install and verify clean first run
 
-1. Run the new `PEAK-Setup-2.0.0.exe` installer.
+1. Run the new `PEAK-Setup-2.1.0.exe` installer.
 2. Start PEAK.
-3. Open **Settings > Setup** before selecting anything.
+3. Open **Settings > Directory** before selecting anything.
 4. Confirm:
-   - Product Data Folder is blank.
-   - Product Data Remote is blank.
+   - The directory list is empty.
    - No parts or projects have loaded.
    - Pull, push, and workflow operations cannot run.
    - No previous appearance, BOM widths, column order, or owner preference has
      returned.
-5. Select the Product-Data checkout.
-6. Confirm data loads and the remote populates from Git `origin`, or enter and
-   save the remote manually.
+5. Add a Product-Data checkout or an empty folder.
+6. Confirm data loads. If the folder has Git `origin`, a purple cloud badge
+   appears. Local-only folders have no remote until one is added in Git.
 7. Pull `main` and confirm the status succeeds.
 8. Open a draft part and test a property edit, BOM add, quantity edit, and BOM
    removal.

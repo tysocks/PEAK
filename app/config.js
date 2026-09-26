@@ -1,1 +1,1 @@
-// PEAK product data is selected from Settings > Setup with a local folder picker.
+// PEAK product data folders are added from Settings > Directory.

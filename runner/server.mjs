@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,12 +37,17 @@ createServer(async (request, response) => {
     }
     if (url.pathname === "/api/config/product-data-folder" && request.method === "POST") {
       const body = await readJsonBody(request);
-      await sendJson(response, await saveProductDataFolder(body?.productDataDir || body?.path));
+      await sendJson(response, await addProductDataFolder(body?.productDataDir || body?.path));
       return;
     }
-    if (url.pathname === "/api/config/product-data-remote" && request.method === "POST") {
+    if (url.pathname === "/api/config/product-data-folder/active" && request.method === "POST") {
       const body = await readJsonBody(request);
-      await sendJson(response, await saveProductDataRemote(body?.remote || body?.url));
+      await sendJson(response, await activateProductDataFolder(body?.productDataDir || body?.path));
+      return;
+    }
+    if (url.pathname === "/api/config/product-data-folder/remove" && request.method === "POST") {
+      const body = await readJsonBody(request);
+      await sendJson(response, await removeProductDataFolder(body?.productDataDir || body?.path));
       return;
     }
     if (url.pathname === "/api/git/status") {
@@ -85,12 +90,14 @@ createServer(async (request, response) => {
 });
 
 function resolveProductDataDir() {
-  const configured = process.env.PEAK_PRODUCT_DATA_DIR || readConfiguredProductDataDir();
-  return configured ? path.resolve(configured) : "";
-}
-
-function readConfiguredProductDataDir() {
-  return readConfiguredSettings().productDataDir || "";
+  const settings = readConfiguredSettings();
+  const dirs = configuredDirectoryPaths(settings);
+  const envDir = String(process.env.PEAK_PRODUCT_DATA_DIR || "").trim();
+  if (envDir) {
+    const resolved = path.resolve(envDir);
+    return findConfiguredDirectory(dirs, resolved) || resolved;
+  }
+  return findConfiguredDirectory(dirs, settings.productDataDir) || dirs[0] || "";
 }
 
 function readConfiguredSettings() {
@@ -102,6 +109,75 @@ function readConfiguredSettings() {
   } catch {
     return {};
   }
+}
+
+function configuredDirectoryPaths(settings = readConfiguredSettings()) {
+  const values = [
+    ...(Array.isArray(settings.productDataDirs) ? settings.productDataDirs : []),
+    settings.productDataDir,
+    process.env.PEAK_PRODUCT_DATA_DIR
+  ];
+  const dirs = [];
+  for (const value of values) {
+    const resolved = String(value || "").trim();
+    if (!resolved) continue;
+    const full = path.resolve(resolved);
+    if (!dirs.some((dir) => sameDirectory(dir, full))) {
+      dirs.push(full);
+    }
+  }
+  return dirs;
+}
+
+function sameDirectory(left, right) {
+  return path.resolve(String(left || "")).toLowerCase() === path.resolve(String(right || "")).toLowerCase();
+}
+
+function findConfiguredDirectory(dirs, value) {
+  const resolved = String(value || "").trim();
+  if (!resolved) return "";
+  const full = path.resolve(resolved);
+  return dirs.find((dir) => sameDirectory(dir, full)) || "";
+}
+
+async function writeDirectoryConfig(dirs, activeDir = "") {
+  const unique = [];
+  for (const value of dirs) {
+    const full = path.resolve(String(value || "").trim());
+    if (!full || unique.some((dir) => sameDirectory(dir, full))) continue;
+    unique.push(full);
+  }
+  const active = findConfiguredDirectory(unique, activeDir) || unique[0] || "";
+  const current = readConfiguredSettings();
+  const next = {
+    ...current,
+    productDataDirs: unique,
+    productDataDir: active
+  };
+  delete next.remote;
+  await writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  productDataDir = active;
+  return { productDataDirs: unique, productDataDir: active };
+}
+
+async function gitOriginForDirectory(dir) {
+  if (!dir || !existsSync(path.join(dir, ".git"))) return "";
+  try {
+    return (await runGit(["remote", "get-url", "origin"], dir)).trim();
+  } catch {
+    return "";
+  }
+}
+
+async function directoryRecords(activeDir = productDataDir) {
+  const dirs = configuredDirectoryPaths();
+  return Promise.all(dirs.map(async (dir) => ({
+    path: dir,
+    name: path.basename(dir),
+    remote: await gitOriginForDirectory(dir),
+    active: Boolean(activeDir) && sameDirectory(dir, activeDir),
+    valid: existsSync(path.join(dir, "manifest.json"))
+  })));
 }
 
 async function pushDraft(body) {
@@ -206,13 +282,13 @@ async function requireCleanWorkingTree(action = "continue") {
 }
 
 async function runnerConfig() {
-  const remote = productDataDir && existsSync(path.join(productDataDir, ".git"))
-    ? (await runGit(["remote", "get-url", "origin"]).catch(() => "")).trim()
-    : "";
+  const directories = await directoryRecords();
+  const remote = directories.find((item) => item.active)?.remote || "";
   return {
     ok: true,
     productDataDir,
     remote,
+    directories,
     configured: Boolean(productDataDir),
     configPath,
     message: productDataDir
@@ -221,36 +297,136 @@ async function runnerConfig() {
   };
 }
 
-async function saveProductDataFolder(value) {
+async function addProductDataFolder(value) {
   const requested = String(value || "").trim();
   if (!requested) {
     throw new Error("Product data folder path is required.");
   }
   const nextDir = path.resolve(requested);
-  if (!existsSync(path.join(nextDir, "manifest.json"))) {
-    throw new Error(`Selected folder is not a PEAK product data repository: ${nextDir}`);
+  if (!existsSync(nextDir)) {
+    throw new Error(`That folder does not exist: ${nextDir}`);
   }
-  const config = { productDataDir: nextDir };
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-  productDataDir = nextDir;
+  let created = false;
+  if (!existsSync(path.join(nextDir, "manifest.json"))) {
+    if (!(await isBlankProductDataFolder(nextDir))) {
+      throw new Error("That folder is not a PEAK product data repository and is not empty. Choose an empty folder or a folder that contains manifest.json.");
+    }
+    await initializeProductDataFolder(nextDir);
+    created = true;
+  }
+  const dirs = configuredDirectoryPaths();
+  const already = findConfiguredDirectory(dirs, nextDir);
+  const nextDirs = already ? dirs : [...dirs, nextDir];
+  const saved = await writeDirectoryConfig(nextDirs, productDataDir || already || nextDir);
+  const directories = await directoryRecords(saved.productDataDir);
+  const addedName = path.basename(nextDir);
   return {
     ok: true,
-    productDataDir,
-    message: `Product data folder configured: ${productDataDir}`
+    ...saved,
+    directories,
+    remote: directories.find((item) => item.active)?.remote || "",
+    message: created
+      ? `Created a new product data repository in ${addedName}`
+      : already
+        ? `Already added: ${addedName}`
+        : dirs.length
+          ? `Added ${addedName}`
+          : `Product data folder configured: ${saved.productDataDir}`
   };
 }
 
-async function saveProductDataRemote(value) {
-  await assertProductDataRepo();
-  const remote = String(value || "").trim();
-  if (!remote) {
-    throw new Error("Product data remote is required.");
+const blankFolderIgnoreNames = new Set([
+  ".ds_store",
+  "thumbs.db",
+  "desktop.ini",
+  ".spotlight-v100",
+  ".trashes",
+  "ehthumbs.db"
+]);
+
+async function isBlankProductDataFolder(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  return entries.every((entry) => {
+    const name = entry.name.toLowerCase();
+    return name === ".git" || blankFolderIgnoreNames.has(name);
+  });
+}
+
+async function initializeProductDataFolder(dir) {
+  const today = new Date().toISOString().slice(0, 10);
+  await mkdir(path.join(dir, "parts"), { recursive: true });
+  await writeFile(path.join(dir, "manifest.json"), `${JSON.stringify({
+    schema: "peak.parts.manifest.v2",
+    updated_at: today,
+    projects: "projects.json",
+    parts: []
+  }, null, 2)}\n`, "utf8");
+  await writeFile(path.join(dir, "projects.json"), `${JSON.stringify({
+    schema: "peak.projects.v1",
+    updated_at: today,
+    projects: []
+  }, null, 2)}\n`, "utf8");
+  try {
+    if (!existsSync(path.join(dir, ".git"))) {
+      await runGit(["init"], dir);
+      await runGit(["symbolic-ref", "HEAD", "refs/heads/main"], dir).catch(() => {});
+    }
+    await runGit(["add", "manifest.json", "projects.json"], dir);
+    if ((await runGit(["status", "--porcelain"], dir)).trim()) {
+      try {
+        await runGit(["commit", "-m", "Initialize PEAK product data repository"], dir);
+      } catch {
+        await runGit(["commit", "-m", "Initialize PEAK product data repository"], dir, {
+          GIT_AUTHOR_NAME: "PEAK",
+          GIT_AUTHOR_EMAIL: "peak@localhost",
+          GIT_COMMITTER_NAME: "PEAK",
+          GIT_COMMITTER_EMAIL: "peak@localhost"
+        });
+      }
+    }
+  } catch {
+    // Scaffolded files are enough for PEAK to load; Git can be finished later.
   }
-  const hasOrigin = Boolean((await runGit(["remote"]).catch(() => "")).split(/\r?\n/).includes("origin"));
-  await runGit(hasOrigin ? ["remote", "set-url", "origin", remote] : ["remote", "add", "origin", remote]);
-  const config = { ...readConfiguredSettings(), productDataDir, productDataRemote: remote };
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-  return { ok: true, productDataDir, remote, message: `Product data remote configured: ${remote}` };
+}
+
+async function activateProductDataFolder(value) {
+  const nextDir = findConfiguredDirectory(configuredDirectoryPaths(), value);
+  if (!nextDir) {
+    throw new Error("That product data folder is not in the directory list.");
+  }
+  if (!existsSync(path.join(nextDir, "manifest.json"))) {
+    throw new Error(`Selected folder is not a PEAK product data repository: ${nextDir}`);
+  }
+  const saved = await writeDirectoryConfig(configuredDirectoryPaths(), nextDir);
+  const directories = await directoryRecords(saved.productDataDir);
+  return {
+    ok: true,
+    ...saved,
+    directories,
+    remote: directories.find((item) => item.active)?.remote || "",
+    message: `Switched to ${path.basename(saved.productDataDir)}`
+  };
+}
+
+async function removeProductDataFolder(value) {
+  const current = configuredDirectoryPaths();
+  const target = findConfiguredDirectory(current, value);
+  if (!target) {
+    throw new Error("That product data folder is not in the directory list.");
+  }
+  const remaining = current.filter((dir) => !sameDirectory(dir, target));
+  const nextActive = sameDirectory(productDataDir, target) ? remaining[0] || "" : productDataDir;
+  const saved = await writeDirectoryConfig(remaining, nextActive);
+  const directories = await directoryRecords(saved.productDataDir);
+  return {
+    ok: true,
+    ...saved,
+    directories,
+    remote: directories.find((item) => item.active)?.remote || "",
+    message: remaining.length
+      ? `Removed ${path.basename(target)}`
+      : "No product data folder configured."
+  };
 }
 
 function assertProductDataConfigured() {
@@ -432,7 +608,7 @@ async function commitAndPushCurrentBranch(message, { branch, syncRemote = true }
     throw new Error(status.message || "Product data Git repository is not configured");
   }
   if (!status.remote) {
-    throw new Error("Product data remote is not configured. Set it in Settings > Setup before pushing.");
+    throw new Error("Product data remote is not configured. The selected folder has no Git origin.");
   }
   const targetBranch = branch || status.branch || "main";
   if (status.dirty) {
@@ -479,8 +655,8 @@ async function githubAuthStatus() {
         ? "GitHub is not connected on this workstation."
         : "GitHub CLI is not installed on this workstation.",
       action: installed
-        ? "Open Settings > Setup and click Connect GitHub. A PEAK GitHub Login window will open; follow its instructions, then retry the workflow action."
-        : "Install GitHub CLI, restart PEAK, then connect GitHub in Settings > Setup."
+        ? "Open Settings > Directory and click Connect GitHub. A PEAK GitHub Login window will open; follow its instructions, then retry the workflow action."
+        : "Install GitHub CLI, restart PEAK, then connect GitHub in Settings > Directory."
     };
   }
 }
@@ -591,13 +767,13 @@ function cleanBranchSegment(value) {
     .slice(0, 80) || "workflow";
 }
 
-async function runGit(args) {
+async function runGit(args, cwd = productDataDir, extraEnv = {}) {
   try {
     const { stdout, stderr } = await execFileAsync("git", args, {
-      cwd: productDataDir,
+      cwd,
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...extraEnv }
     });
     return `${stdout}${stderr}`.trim();
   } catch (error) {
